@@ -1,0 +1,16 @@
+/* CustomerPortal.css */
+/* Ensure the main content is not hidden behind the sticky top bar */
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}
+
+/* Add bottom padding to avoid overlap with the fixed top bar */
+.max-w-7xl {
+  padding-top: 4rem; /* space for top bar */
+}
+
+/* Optional: smooth scroll for tab navigation */
+html {
+  scroll-behavior: smooth;
+}

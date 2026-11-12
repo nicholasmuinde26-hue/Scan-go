@@ -1,0 +1,23 @@
+{
+  "name": "Scan & Go",
+  "short_name": "Scan & Go",
+  "description": "Scan. Pay. Verify. Go. Shop in store or collect your order.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0E2A5C",
+  "theme_color": "#0E2A5C",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/cart-logo-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
