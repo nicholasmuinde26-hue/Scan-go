@@ -107,8 +107,9 @@ router.post('/otp/send', async (req: Request, res: Response) => {
     });
 
     // In production, integrate SMS provider (Africa's Talking / Twilio).
-    // In dev / demo mode, return the otp code so the user can complete testing without an SMS bill.
-    const isDev = ENV.NODE_ENV !== 'production';
+    // Dev/demo mode returns the otp code so testers can complete flows without SMS.
+    // OTP_DEV_ECHO=true also enables the echo in production for demo deployments.
+    const isDev = ENV.NODE_ENV !== 'production' || process.env.OTP_DEV_ECHO === 'true';
 
     res.json({
       success: true,
