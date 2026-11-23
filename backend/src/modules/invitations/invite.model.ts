@@ -6,6 +6,11 @@ export interface IInvite extends Document {
   role: UserRole;
   organizationId?: Schema.Types.ObjectId;
   storeId?: Schema.Types.ObjectId;
+  managedStoreIds?: Schema.Types.ObjectId[];
+  managedOrganizationIds?: Schema.Types.ObjectId[];
+  departmentId?: Schema.Types.ObjectId;
+  reportsTo?: Schema.Types.ObjectId;
+  employeeId?: string;
   phone: string;
   email?: string;
   name: string;
@@ -23,6 +28,11 @@ const inviteSchema = new Schema<IInvite>(
     role: { type: String, required: true },
     organizationId: { type: Schema.Types.ObjectId, ref: 'Organization' },
     storeId: { type: Schema.Types.ObjectId, ref: 'Store' },
+    managedStoreIds: [{ type: Schema.Types.ObjectId, ref: 'Store' }],
+    managedOrganizationIds: [{ type: Schema.Types.ObjectId, ref: 'Organization' }],
+    departmentId: { type: Schema.Types.ObjectId, ref: 'Department' },
+    reportsTo: { type: Schema.Types.ObjectId, ref: 'User' },
+    employeeId: { type: String, trim: true },
     phone: { type: String, required: true, index: true },
     email: { type: String, sparse: true },
     name: { type: String, required: true },

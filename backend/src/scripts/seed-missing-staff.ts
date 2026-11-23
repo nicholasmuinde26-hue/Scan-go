@@ -41,9 +41,11 @@ async function main() {
 
   const passwordHash = await bcrypt.hash('password123', 10);
   const wanted = [
-    { name: 'Peter Ouma (Stock Controller)', phone: '0777555666', email: 'peter.stock@supermarket.co.ke', role: 'STOCK_CONTROLLER', storeId: store._id, organizationId: org._id },
+    { name: 'Peter Ouma (Naivas Stock Manager)', phone: '0777555666', email: 'peter.stock@supermarket.co.ke', role: 'STOCK_CONTROLLER', storeId: store._id, organizationId: org._id },
+    { name: 'Naivas Stock Manager', phone: '0777111222', email: 'stock.naivas@supermarket.co.ke', role: 'STOCK_CONTROLLER', storeId: store._id, organizationId: org._id },
     { name: 'Samuel Njoroge (Branch Manager)', phone: '0799777888', email: 'branch.manager@supermarket.co.ke', role: 'BRANCH_MANAGER', storeId: store._id, organizationId: org._id },
-    { name: 'Faith Njeri (Catalogue & Inventory Manager)', phone: '0788666777', email: 'faith.catalogue@supermarket.co.ke', role: 'CATALOGUE_INVENTORY_MANAGER', organizationId: org._id },
+    { name: 'Faith Njeri (Naivas Catalogue & Inventory Manager)', phone: '0788666777', email: 'faith.catalogue@supermarket.co.ke', role: 'CATALOGUE_INVENTORY_MANAGER', storeId: store._id, organizationId: org._id },
+    { name: 'Naivas Catalogue Manager', phone: '0788111222', email: 'catalogue.naivas@supermarket.co.ke', role: 'CATALOGUE_INVENTORY_MANAGER', storeId: store._id, organizationId: org._id },
   ];
 
   for (const u of wanted) {

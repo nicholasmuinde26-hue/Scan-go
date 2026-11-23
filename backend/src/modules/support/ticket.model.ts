@@ -14,9 +14,16 @@ export interface ISupportTicket extends Document {
   customerPhone: string;
   customerName?: string;
   orderId?: Schema.Types.ObjectId;
+  // Origin context: customer-help tickets have none; organization tickets carry the
+  // supermarket (and optionally the branch) that raised them.
+  source?: 'CUSTOMER' | 'STAFF' | 'PLATFORM';
+  organizationId?: Schema.Types.ObjectId;
+  storeId?: Schema.Types.ObjectId;
+  raisedBy?: Schema.Types.ObjectId;
+  raisedByName?: string;
   subject: string;
   description: string;
-  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'CLOSED';
+  status: 'OPEN' | 'ASSIGNED' | 'IN_PROGRESS' | 'WAITING_CUSTOMER' | 'RESOLVED' | 'CLOSED';
   priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
   tier: 'TIER_1' | 'TIER_2';
   assignedTo?: Schema.Types.ObjectId;
@@ -35,11 +42,16 @@ const ticketSchema = new Schema<ISupportTicket>(
     customerPhone: { type: String, required: true, index: true },
     customerName: String,
     orderId: { type: Schema.Types.ObjectId, ref: 'Order' },
+    source: { type: String, enum: ['CUSTOMER', 'STAFF', 'PLATFORM'], default: 'CUSTOMER', index: true },
+    organizationId: { type: Schema.Types.ObjectId, ref: 'Organization', index: true },
+    storeId: { type: Schema.Types.ObjectId, ref: 'Store', index: true },
+    raisedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    raisedByName: String,
     subject: { type: String, required: true },
     description: { type: String, required: true },
     status: {
       type: String,
-      enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
+      enum: ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER', 'RESOLVED', 'CLOSED'],
       default: 'OPEN',
       index: true,
     },

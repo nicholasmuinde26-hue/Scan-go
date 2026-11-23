@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { ENV } from '../../config/environment.js';
+import { sendCustomerPush } from '../../modules/notifications/push.service.js';
 
 export interface SseClient {
   id: string;
@@ -94,6 +95,12 @@ export function handleSseConnection(req: Request, res: Response) {
  * Broadcast an event to relevant connected clients across portals.
  */
 export function broadcastEvent(event: StreamEvent) {
+  if (event.targetUserId) {
+    const pushPayload = { orderId: event.payload?.orderId, orderNumber: event.payload?.orderNumber, orderType: event.payload?.orderType };
+    void sendCustomerPush(event.targetUserId, event.type, pushPayload).catch(error => {
+      console.warn('[Push] Customer notification could not be delivered:', error?.message || error);
+    });
+  }
   const data = JSON.stringify({
     type: event.type,
     payload: event.payload,

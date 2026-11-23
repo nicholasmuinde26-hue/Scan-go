@@ -1,0 +1,1 @@
+export type Store = { _id:string; name:string; location?:{address?:string;city?:string}; pickupSlots?:{slotId:string;startTime:string;endTime:string;capacity:number;active:boolean}[]; shopAndCollectAvailable:boolean; shopAndCollectUnavailableReason?:string };

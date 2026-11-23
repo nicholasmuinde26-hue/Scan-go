@@ -26,6 +26,9 @@ import { Store, User, Product } from '../../types.js';
 import { apiRequest, formatKes } from '../../api.js';
 import { can, canAny } from '../../permissions.js';
 import { BranchRoleDirectory } from './BranchRoleDirectory.js';
+import { OrgStructurePanel } from './OrgStructurePanel.js';
+import { OrgHelpdeskPanel } from './OrgHelpdeskPanel.js';
+import { Network, Headphones } from 'lucide-react';
 
 interface OrgAdminDashboardProps {
   currentUser?: User | null;
@@ -34,7 +37,7 @@ interface OrgAdminDashboardProps {
   onRefreshStores?: () => void;
 }
 
-type OrgTab = 'STORES' | 'STAFF' | 'CATALOGUE_POLICY' | 'BILLING' | 'REPORTS' | 'SETTINGS';
+type OrgTab = 'STORES' | 'STAFF' | 'ORG_STRUCTURE' | 'HELPDESK' | 'CATALOGUE_POLICY' | 'BILLING' | 'REPORTS' | 'SETTINGS';
 
 export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
   currentUser,
@@ -46,6 +49,8 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
   const allTabs: { id: OrgTab; label: string; icon: any; allowed: boolean }[] = [
     { id: 'STORES', label: 'All Stores', icon: Building2, allowed: can(currentUser, 'stores:read') },
     { id: 'STAFF', label: 'Staff & Invitations', icon: Users, allowed: can(currentUser, 'staff:read') },
+    { id: 'ORG_STRUCTURE', label: 'Regions & Roles', icon: Network, allowed: can(currentUser, 'org:read') },
+    { id: 'HELPDESK', label: 'Support Desk', icon: Headphones, allowed: can(currentUser, 'org:read') },
     { id: 'CATALOGUE_POLICY', label: 'Catalogue & Pricing Policy', icon: Boxes, allowed: can(currentUser, 'pricing:read') },
     { id: 'BILLING', label: 'Subscription & Billing', icon: CreditCard, allowed: canAny(currentUser, ['org:subscription:view', 'wallet:read', 'finance:invoices:read', 'payouts:view', 'payouts:request']) },
     { id: 'REPORTS', label: 'Org-Wide Reports', icon: BarChart3, allowed: can(currentUser, 'reports:read') },
@@ -57,6 +62,7 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
   const [activeTab, setActiveTab] = useState<OrgTab>((visibleTabs[0]?.id || 'STORES') as OrgTab);
   const [loading, setLoading] = useState(false);
   const [orgStaff, setOrgStaff] = useState<any[]>([]);
+  const [orgInvoices, setOrgInvoices] = useState<any[]>([]);
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [newStoreModalOpen, setNewStoreModalOpen] = useState(false);
   const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -67,6 +73,7 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('BRANCH_MANAGER');
   const [inviteStoreId, setInviteStoreId] = useState(currentStore._id);
+  const [inviteManagedStoreIds, setInviteManagedStoreIds] = useState<string[]>([]);
 
   // New Store state
   const [storeName, setStoreName] = useState('');
@@ -94,12 +101,17 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
 
   useEffect(() => {
     loadStaff();
+    if (canAny(currentUser, ['finance:invoices:read', 'org:subscription:view'])) {
+      apiRequest('/billing/invoices').then((r) => r?.success && setOrgInvoices(r.invoices || [])).catch(() => {});
+    }
   }, [currentStore._id]);
 
   const handleSendInvite = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       setLoading(true);
+      const orgLevelRoles = ['FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR', 'GENERAL_MANAGER'];
+      const isOrgLevel = orgLevelRoles.includes(inviteRole);
       await apiRequest('/invites', {
         method: 'POST',
         body: JSON.stringify({
@@ -107,9 +119,11 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
           phone: invitePhone,
           email: inviteEmail,
           role: inviteRole,
-          storeId: inviteStoreId,
+          storeId: isOrgLevel ? undefined : inviteStoreId,
+          managedStoreIds: ['REGION_MANAGER', 'BRANCH_MANAGER'].includes(inviteRole) && inviteManagedStoreIds.length ? inviteManagedStoreIds : undefined,
         }),
       });
+      setInviteManagedStoreIds([]);
       setStatusMsg({ type: 'success', text: `Invitation sent to ${invitePhone || inviteEmail} successfully.` });
       setInviteModalOpen(false);
       setInviteName('');
@@ -353,6 +367,16 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
       {/* Staff and roles across every branch (stock controllers and all other branch roles) */}
       {activeTab === 'STAFF' && visibleTabs.some((t) => t.id === 'STAFF') && <BranchRoleDirectory />}
 
+      {/* Tab: Regions, departments, custom roles */}
+      {activeTab === 'ORG_STRUCTURE' && visibleTabs.some((t) => t.id === 'ORG_STRUCTURE') && (
+        <OrgStructurePanel currentUser={currentUser} stores={stores} />
+      )}
+
+      {/* Tab: Organization support desk */}
+      {activeTab === 'HELPDESK' && visibleTabs.some((t) => t.id === 'HELPDESK') && (
+        <OrgHelpdeskPanel currentUser={currentUser} stores={stores} />
+      )}
+
       {/* Tab 3: Catalogue & Pricing Policy */}
       {activeTab === 'CATALOGUE_POLICY' && visibleTabs.some((t) => t.id === 'CATALOGUE_POLICY') && (
         <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-xs space-y-6">
@@ -455,25 +479,20 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
           <div className="border border-slate-200 rounded-2xl p-5 space-y-3">
             <h4 className="font-bold text-navy-800 text-sm">Recent Billing Statements</h4>
             <div className="divide-y divide-slate-100 text-xs">
-              {[
-                { inv: 'INV-2026-003', period: 'October 2026', amount: 7500000, status: 'PAID' },
-                { inv: 'INV-2026-002', period: 'September 2026', amount: 7500000, status: 'PAID' },
-                { inv: 'INV-2026-001', period: 'August 2026', amount: 7500000, status: 'PAID' },
-              ].map((item, idx) => (
-                <div key={idx} className="py-2.5 flex items-center justify-between">
+              {orgInvoices.length === 0 && (
+                <p className="py-4 text-center text-slate-400">No invoices issued yet. Invoices are generated by the platform billing team each period.</p>
+              )}
+              {orgInvoices.slice(0, 6).map((item) => (
+                <div key={item._id} className="py-2.5 flex items-center justify-between">
                   <div>
-                    <strong className="text-navy-700">{item.inv}</strong>
-                    <span className="text-slate-400 ml-2">({item.period})</span>
+                    <strong className="text-navy-700">{item.invoiceNumber}</strong>
+                    <span className="text-slate-400 ml-2">({new Date(item.periodStart).toLocaleDateString()} to {new Date(item.periodEnd).toLocaleDateString()})</span>
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="font-bold text-navy-800">{formatKes(item.amount)}</span>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-brand-100 text-brand-800">
+                    <span className="font-bold text-navy-800">{formatKes(item.totalMinor)}</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${item.status === 'PAID' ? 'bg-brand-100 text-brand-800' : item.status === 'OVERDUE' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-800'}`}>
                       {item.status}
                     </span>
-                    {can(currentUser, 'finance:invoices:read') && <button className="text-azure-600 hover:underline font-bold flex items-center space-x-1">
-                      <Download className="w-3.5 h-3.5" />
-                      <span>PDF</span>
-                    </button>}
                   </div>
                 </div>
               ))}
@@ -653,6 +672,11 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
                   onChange={(e) => setInviteRole(e.target.value)}
                   className="w-full border border-slate-200 rounded-xl p-3 bg-white font-semibold text-navy-700"
                 >
+                  <optgroup label="Management">
+                    <option value="GENERAL_MANAGER">General Manager</option>
+                    <option value="REGION_MANAGER">Region Manager</option>
+                  </optgroup>
+                  <optgroup label="Branch & Staff">
                   <option value="BRANCH_MANAGER">Branch Manager</option>
                   <option value="STOCK_CONTROLLER">Stock Controller</option>
                   <option value="SUPERVISOR">Store Floor Supervisor</option>
@@ -661,9 +685,18 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
                   <option value="EXIT_OFFICER">Exit Gate Officer</option>
                   <option value="CASHIER_CUSTOMER_SERVICE">Cashier / Helpdesk</option>
                   <option value="DELIVERY_COLLECTION_HANDOVER">Collection Handover Desk</option>
+                  </optgroup>
+                  <optgroup label="Organization specialists">
+                    <option value="FINANCE_OFFICER">Finance Officer</option>
+                    <option value="CATALOGUE_INVENTORY_MANAGER">Catalogue & Inventory Manager</option>
+                    <option value="MARKETING_MANAGER">Marketing Manager</option>
+                    <option value="LOSS_PREVENTION_MANAGER">Loss Prevention Manager</option>
+                    <option value="ORG_AUDITOR">Organization Auditor</option>
+                  </optgroup>
                 </select>
               </div>
 
+              {!['FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR', 'GENERAL_MANAGER'].includes(inviteRole) && (
               <div>
                 <label className="font-bold text-slate-700 block mb-1">Target Branch Location</label>
                 <select
@@ -678,6 +711,30 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
                   ))}
                 </select>
               </div>
+              )}
+
+              {['REGION_MANAGER', 'BRANCH_MANAGER'].includes(inviteRole) && stores.length > 1 && (
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">
+                    {inviteRole === 'REGION_MANAGER' ? 'Branches this region oversees (required)' : 'Additional branches this manager oversees (optional)'}
+                  </label>
+                  <div className="max-h-36 overflow-y-auto border border-slate-200 rounded-xl p-2 space-y-1 bg-slate-50">
+                    {stores.map((s) => (
+                      <label key={s._id} className="flex items-center gap-2 text-xs text-navy-800">
+                        <input
+                          type="checkbox"
+                          checked={inviteManagedStoreIds.includes(s._id)}
+                          onChange={(e) => setInviteManagedStoreIds((prev) => e.target.checked ? [...prev, s._id] : prev.filter((id) => id !== s._id))}
+                        />
+                        {s.name}
+                      </label>
+                    ))}
+                  </div>
+                  {inviteRole === 'REGION_MANAGER' && inviteManagedStoreIds.length === 0 && (
+                    <p className="text-[10px] text-amber-600 mt-1 font-semibold">Select at least one branch.</p>
+                  )}
+                </div>
+              )}
 
               <div className="pt-2 flex items-center justify-end space-x-2">
                 <button

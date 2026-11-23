@@ -2,6 +2,7 @@
 export type PlatformRole =
   | 'PLATFORM_OWNER'
   | 'PLATFORM_ADMIN'
+  | 'PLATFORM_SUBADMIN'
   | 'FINANCE_ADMIN'
   | 'FINANCE_APPROVER'
   | 'SUPPORT_AGENT_TIER1'
@@ -15,6 +16,7 @@ export type PlatformRole =
 export type OrganizationRole =
   | 'ORG_OWNER'
   | 'ORG_ADMIN'
+  | 'GENERAL_MANAGER'
   | 'FINANCE_OFFICER'
   | 'CATALOGUE_INVENTORY_MANAGER'
   | 'MARKETING_MANAGER'
@@ -22,9 +24,12 @@ export type OrganizationRole =
   | 'ORG_AUDITOR';
 
 // Branch roles (store manager and staff split into specialized roles)
+// REGION_MANAGER oversees a configured subset of branches (managedStoreIds), not a single store.
 export type BranchRole =
+  | 'REGION_MANAGER'
   | 'BRANCH_MANAGER'
   | 'STOCK_CONTROLLER'
+  | 'STOCK_MANAGER'
   | 'SUPERVISOR'
   | 'CASHIER_CUSTOMER_SERVICE'
   | 'PICKER'

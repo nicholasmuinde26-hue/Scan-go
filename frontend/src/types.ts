@@ -9,7 +9,10 @@ export type UserRole =
   | 'BRANCH_MANAGER'
   | 'ORG_ADMIN'
   | 'ORG_OWNER'
+  | 'GENERAL_MANAGER'
+  | 'REGION_MANAGER'
   | 'STOCK_CONTROLLER'
+  | 'STOCK_MANAGER'
   | 'CATALOGUE_INVENTORY_MANAGER'
   | 'CASHIER_CUSTOMER_SERVICE'
   | 'DELIVERY_COLLECTION_HANDOVER'
@@ -19,6 +22,7 @@ export type UserRole =
   | 'MARKETING_MANAGER'
   | 'PLATFORM_OWNER'
   | 'PLATFORM_ADMIN'
+  | 'PLATFORM_SUBADMIN'
   | 'FINANCE_ADMIN'
   | 'FINANCE_APPROVER'
   | 'SUPPORT_AGENT_TIER1'
@@ -39,6 +43,8 @@ export interface User {
   role: UserRole;
   storeId?: string;
   organizationId?: string;
+  managedStoreIds?: string[];
+  managedOrganizationIds?: string[];
   tripsCompleted?: number;
   cleanTrips?: number;
   confirmedDiscrepancies?: number;

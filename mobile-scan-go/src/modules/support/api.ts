@@ -1,0 +1,2 @@
+import { request } from '../../core/api/client'; import type { SupportTicket } from './types';
+export const supportApi={list:()=>request<{success:true;tickets:SupportTicket[]}>('/support/my/tickets'),create:(input:{subject:string;description:string;orderId?:string})=>request<{success:true;ticket:SupportTicket}>('/support/my/tickets',{method:'POST',body:JSON.stringify(input)}),sendMessage:(ticketId:string,message:string)=>request<any>(`/support/my/tickets/${ticketId}/messages`,{method:'POST',body:JSON.stringify({message})})};

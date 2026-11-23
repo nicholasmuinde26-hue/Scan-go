@@ -1,0 +1,2 @@
+import AsyncStorage from '@react-native-async-storage/async-storage'; import { request } from '../../core/api/client'; import type { ExitPass } from './types';
+export const exitPassApi={get:async(orderId:string):Promise<ExitPass>=>{const key=`pass_${orderId}`;try{const response=await request<{success:true}&ExitPass>(`/orders/${orderId}/rotating-qr`);await AsyncStorage.setItem(key,JSON.stringify(response));return response;}catch(error){const saved=await AsyncStorage.getItem(key);if(!saved)throw error;return {...JSON.parse(saved),offline:true};}}};

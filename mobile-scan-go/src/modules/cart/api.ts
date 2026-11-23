@@ -1,0 +1,2 @@
+import { request } from '../../core/api/client';
+export const cartApi={createOrder:(input:{storeId:string;items:{productId:string;quantity:number}[];pickupSlot:{slotId:string;date:string;timeWindow:string};paymentPlan:'FULL'|'DEPOSIT';substitutionsAllowed:boolean})=>request<{success:true;order:any;dueNowMinor:number;balanceAtPickupMinor:number}>('/orders/click-and-collect',{method:'POST',body:JSON.stringify(input)}),createAddon:(orderId:string,input:unknown)=>request<any>(`/orders/${orderId}/create-addon`,{method:'POST',body:JSON.stringify(input)})};

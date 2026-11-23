@@ -2,7 +2,7 @@ import { Router } from 'express';
 import Product from './product.model.js';
 import Order from '../orders/order.model.js';
 import { Types } from 'mongoose';
-import { authenticate, authorize, requirePermission, requireAnyPermission, requireRoleScope, canAccessStore, AuthRequest } from '../../middleware/auth.js';
+import { authenticate, authorize, requirePermission, requireAnyPermission, requireRoleScope, canAccessStore, isPlatformRole, AuthRequest } from '../../middleware/auth.js';
 import AuditLog from '../audits/audit.model.js';
 import Store from '../stores/store.model.js';
 import Approval from '../approvals/approval.model.js';
@@ -13,8 +13,8 @@ import { UserRole } from '../../shared/types/index.js';
 const router = Router();
 
 const CATALOGUE_ROLES: UserRole[] = ['ORG_ADMIN', 'ORG_OWNER', 'CATALOGUE_INVENTORY_MANAGER', 'SYSTEM_ADMIN'];
-const INVENTORY_ROLES: UserRole[] = ['STOCK_CONTROLLER', 'BRANCH_MANAGER', 'STORE_MANAGER', 'ORG_ADMIN', 'ORG_OWNER', 'SYSTEM_ADMIN'];
-const STOCK_OPERATIONS_ROLES: UserRole[] = ['STOCK_CONTROLLER', 'BRANCH_MANAGER', 'STORE_MANAGER', 'SYSTEM_ADMIN'];
+const INVENTORY_ROLES: UserRole[] = ['STOCK_CONTROLLER', 'STOCK_MANAGER', 'BRANCH_MANAGER', 'STORE_MANAGER', 'ORG_ADMIN', 'ORG_OWNER', 'SYSTEM_ADMIN'];
+const STOCK_OPERATIONS_ROLES: UserRole[] = ['STOCK_CONTROLLER', 'STOCK_MANAGER', 'BRANCH_MANAGER', 'STORE_MANAGER', 'SYSTEM_ADMIN'];
 const CATALOGUE_QUEUE_ROLES: UserRole[] = [...INVENTORY_ROLES, 'CATALOGUE_INVENTORY_MANAGER'];
 
 // Tenant scope for catalogue and stock work: branch staff are limited to their OWN branch (not every branch in the
@@ -31,10 +31,11 @@ async function logInventory(req: AuthRequest, input: Record<string, any>) {
 }
 
 
-/** A stock controller (inventory:write without pricing:write) may propose products but not set prices directly. */
+/** Who may set or change prices: users with pricing:write (super-admins / platform roles cannot set branch store prices). */
 function canSetPrices(req: AuthRequest): boolean {
+  if (req.user?.role && isPlatformRole(req.user.role)) return false;
   const perms = req.user?.permissions || [];
-  return perms.includes('pricing:write') || perms.includes('system:admin');
+  return perms.includes('pricing:write');
 }
 
 /** Returns a message if any of these codes is already a barcode, extra barcode or PLU of another product in the branch. */
@@ -52,10 +53,11 @@ class HttpError extends Error {
   constructor(status: number, message: string) { super(message); this.status = status; }
 }
 
-/** Stock controllers (and anyone without pricing rights) cannot set prices; this is who may approve a new product. */
+/** Stock controllers / stock managers and catalogue managers may approve receiving products; super-admin/platform roles cannot. */
 function canApproveRegistrations(req: AuthRequest): boolean {
-  const perms = req.user?.permissions || [];
-  return perms.includes('inventory:approve') && (perms.includes('pricing:write') || perms.includes('system:admin'));
+  if (!req.user || isPlatformRole(req.user.role)) return false;
+  const perms = req.user.permissions || [];
+  return perms.includes('inventory:approve');
 }
 
 // ---- Product photos ---------------------------------------------------------------------------------------------
@@ -101,33 +103,41 @@ interface RegistrationInput {
  */
 async function submitRegistration(req: AuthRequest, input: RegistrationInput) {
   const soldBy = input.soldBy === 'weight' ? 'weight' : 'unit';
-  const product = new Product({
-    storeId: input.storeId, name: input.name, category: input.category, barcode: input.barcode,
-    barcodeAliases: input.barcodeAliases || [], pluCode: input.pluCode, sku: `SKU-${input.barcode}`,
-    priceMinor: input.priceMinor || 0, vatRateBps: input.vatRateBps || 0,
-    isWeighted: soldBy === 'weight', soldBy, pricePerKgMinor: soldBy === 'weight' ? input.pricePerKgMinor : undefined,
-    stock: 0, active: false,
-  });
+  let product = await Product.findOne({ storeId: input.storeId, barcode: input.barcode, active: false });
+  if (!product) {
+    product = new Product({
+      storeId: input.storeId, name: input.name, category: input.category, barcode: input.barcode,
+      barcodeAliases: input.barcodeAliases || [], pluCode: input.pluCode, sku: `SKU-${input.barcode}`,
+      priceMinor: input.priceMinor || 0, vatRateBps: input.vatRateBps || 0,
+      isWeighted: soldBy === 'weight', soldBy, pricePerKgMinor: soldBy === 'weight' ? input.pricePerKgMinor : undefined,
+      stock: 0, active: false,
+    });
+  } else {
+    product.name = input.name;
+    product.category = input.category;
+    if (input.priceMinor) product.priceMinor = input.priceMinor;
+    if (input.vatRateBps !== undefined) product.vatRateBps = input.vatRateBps;
+  }
   if (input.image) applyImage(product, input.image);
   await product.save();
   const approval = await Approval.create({
     type: 'PRODUCT_REGISTRATION', status: 'PENDING', requestedBy: req.user!.id, requestedByRole: req.user!.role, requestedByName: req.user!.name,
     targetType: 'PRODUCT', targetId: product._id,
-    requestData: { kind: 'PRODUCT_REGISTRATION', productId: product._id, storeId: input.storeId, name: product.name, barcode: input.barcode },
-    requiresSecondFactor: false, expiresAt: new Date(Date.now() + 7 * 86400000), creatorCanApprove: false,
+    requestData: { kind: 'PRODUCT_REGISTRATION', productId: product._id, storeId: String(input.storeId), name: product.name, barcode: input.barcode },
+    requiresSecondFactor: false, expiresAt: new Date(Date.now() + 7 * 86400000), creatorCanApprove: true,
   });
   input.unknown.productId = product._id;
   await input.unknown.save();
   await logInventory(req, { action: 'PRODUCT_REGISTRATION_REQUESTED', entityId: product._id.toString(), storeId: input.storeId, newValue: { approvalId: approval._id, barcode: input.barcode, receivedQuantity: input.unknown.pendingReceiveQuantity } });
   const priced = soldBy === 'weight' ? Number(input.pricePerKgMinor) > 0 : Number(input.priceMinor) > 0;
   if (canApproveRegistrations(req) && priced) {
-    const done = await approveRegistration(req, approval, {}, 'Registered by catalogue manager');
+    const done = await approveRegistration(req, approval, {}, 'Registered by inventory manager');
     return { product: done.product, approval: done.approval, receipt: done.receipt, autoApproved: true };
   }
   return { product: publicProduct(product), approval, receipt: null, autoApproved: false };
 }
 
-/** Puts an approved registration on sale: sets the final price, posts the delivery into stock, shares it to every branch. */
+/** Puts an approved registration on sale at THIS branch and refreshes the org catalogue template. */
 async function approveRegistration(req: AuthRequest, approval: any, changes: Record<string, any>, reason: string) {
   const storeId = String(approval.requestData.storeId);
   const product = await Product.findById(approval.targetId).select('+imageData');
@@ -148,11 +158,14 @@ async function approveRegistration(req: AuthRequest, approval: any, changes: Rec
   if (!decided) throw new HttpError(409, 'This request was already decided by another manager.');
   try {
     product.active = true;
-    const unknown = await UnknownBarcode.findOne({ storeId, barcode: product.barcode, status: 'OPEN' });
+    const unknown = (await UnknownBarcode.findOne({ storeId, productId: product._id, status: 'OPEN' })) ||
+                    (await UnknownBarcode.findOne({ storeId, barcode: product.barcode, status: 'OPEN' }));
     const quantity = Number(unknown?.pendingReceiveQuantity || 0);
     if (quantity > 0) product.stock = (product.stock || 0) + quantity;
 
-    let branches: any[] = [];
+    // Branches are independent: approving a registration only puts THIS branch's product
+    // on sale and refreshes the org catalogue template. Other branches pull the item
+    // from the catalogue themselves (POST /products/from-catalogue).
     const store = await Store.findById(storeId).select('organizationId');
     if (store?.organizationId) {
       let master = await CatalogueProduct.findOne({ organizationId: store.organizationId, barcode: product.barcode });
@@ -165,21 +178,12 @@ async function approveRegistration(req: AuthRequest, approval: any, changes: Rec
       if (product.imageData) (master as any).imageData = product.imageData;
       await master.save();
       product.catalogueProductId = master._id as any;
-      branches = await Store.find({ organizationId: store.organizationId, active: true }).select('_id').lean();
     }
     await product.save();
 
     let receipt: any = null;
     if (quantity > 0 && unknown) {
       receipt = await GoodsReceipt.create({ storeId, productId: product._id, barcode: product.barcode, quantity, supplier: unknown.pendingSupplier, deliveryReference: unknown.pendingDeliveryReference, notes: unknown.pendingReceiveNotes || 'Delivery received before the product was registered', receivedBy: unknown.reportedBy || req.user!.id, receivedByName: unknown.reportedByName || req.user!.name });
-    }
-    for (const branch of branches) {
-      if (String(branch._id) === storeId) continue;
-      const exists = await Product.findOne({ storeId: branch._id, $or: [{ catalogueProductId: product.catalogueProductId }, { barcode: product.barcode }] }).select('_id');
-      if (exists) continue;
-      const copy = new Product({ storeId: branch._id, catalogueProductId: product.catalogueProductId, name: product.name, category: product.category, barcode: product.barcode, barcodeAliases: product.barcodeAliases, pluCode: product.pluCode, sku: product.sku, priceMinor: product.priceMinor, compareAtPriceMinor: product.compareAtPriceMinor, vatRateBps: product.vatRateBps, isWeighted: product.isWeighted, soldBy: product.soldBy, pricePerKgMinor: product.pricePerKgMinor, requiresSerializedTag: product.requiresSerializedTag, highTheft: product.highTheft, stock: 0, active: true });
-      if (product.imageData) applyImage(copy, product.imageData);
-      await copy.save();
     }
     if (unknown) { unknown.status = 'RESOLVED'; unknown.productId = product._id as any; await unknown.save(); }
     await logInventory(req, { action: 'PRODUCT_REGISTRATION_APPROVED', entityId: product._id.toString(), storeId, reason, newValue: { approvalId: approval._id, name: product.name, priceMinor: product.priceMinor, stock: product.stock, receiptId: receipt?._id } });
@@ -247,7 +251,7 @@ async function proposeProduct(req: AuthRequest, res: any, storeId: string) {
     type: 'PRODUCT_REGISTRATION', status: 'PENDING', requestedBy: req.user!.id, requestedByRole: req.user!.role, requestedByName: req.user!.name,
     targetType: 'PRODUCT', targetId: product._id,
     requestData: { kind: 'PRODUCT_REGISTRATION', productId: product._id, storeId, name: product.name, barcode },
-    requiresSecondFactor: false, expiresAt: new Date(Date.now() + 7 * 86400000), creatorCanApprove: false,
+    requiresSecondFactor: false, expiresAt: new Date(Date.now() + 7 * 86400000), creatorCanApprove: true,
   });
   await logInventory(req, { action: 'PRODUCT_REGISTRATION_REQUESTED', entityId: product._id.toString(), storeId, newValue: { approvalId: approval._id, barcode, priceMinor } });
   return res.status(202).json({
@@ -359,9 +363,14 @@ router.get('/alerts/low-stock', authenticate, requirePermission('inventory:read'
 // Bulk import products (JSON array or CSV items)
 router.post('/bulk-import', authenticate, requirePermission('inventory:write', 'pricing:write'), requireRoleScope('ORG'), async (req: AuthRequest, res) => {
   try {
-    const { products: items, storeId, organizationWide = true } = req.body;
+    const { products: items, storeId, organizationWide = false } = req.body;
     if (!Array.isArray(items) || items.length === 0) {
       res.status(400).json({ success: false, error: 'products array is required and cannot be empty.' });
+      return;
+    }
+    // Chain-wide pushes change every branch's prices — restricted to org config holders.
+    if (organizationWide && !(req.user?.permissions || []).includes('org:config')) {
+      res.status(403).json({ success: false, error: 'Organization-wide catalogue pushes require organization configuration permission.' });
       return;
     }
 
@@ -471,8 +480,11 @@ router.post('/bulk-import', authenticate, requirePermission('inventory:write', '
 // Preview a bulk catalogue import without changing product or stock records.
 router.post('/bulk-import/preview', authenticate, requirePermission('inventory:write', 'pricing:write'), requireRoleScope('ORG'), async (req: AuthRequest, res) => {
   try {
-    const { storeId, products: rows, organizationWide = true } = req.body;
+    const { storeId, products: rows, organizationWide = false } = req.body;
     if (!storeId || !Array.isArray(rows) || rows.length === 0) return res.status(400).json({ success: false, error: 'storeId and a non-empty products array are required.' });
+    if (organizationWide && !(req.user?.permissions || []).includes('org:config')) {
+      return res.status(403).json({ success: false, error: 'Organization-wide catalogue pushes require organization configuration permission.' });
+    }
     if (!(await hasStoreScope(req, String(storeId)))) return res.status(403).json({ success: false, error: 'You cannot import into this branch.' });
     const baseStore = await Store.findById(storeId).select('organizationId');
     if (!baseStore) return res.status(404).json({ success: false, error: 'Branch not found.' });
@@ -503,7 +515,69 @@ router.post('/bulk-import/preview', authenticate, requirePermission('inventory:w
   } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
 
-router.post('/inventory/receive', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+// Org catalogue template library: items other branches (or this one) have registered.
+// Branches browse this and pull items into their own inventory — nothing is pushed automatically.
+router.get('/catalogue', authenticate, requirePermission('inventory:read'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
+  try {
+    const storeId = String(req.query.storeId || req.user?.storeId || '');
+    if (!storeId || !(await hasStoreScope(req, storeId))) {
+      return res.status(403).json({ success: false, error: 'Branch scope is required.' });
+    }
+    const store = await Store.findById(storeId).select('organizationId');
+    if (!store?.organizationId) return res.json({ success: true, items: [] });
+    const items = await CatalogueProduct.find({ organizationId: store.organizationId, active: true }).sort({ category: 1, name: 1 });
+    const existing = await Product.find({ storeId, catalogueProductId: { $in: items.map((i) => i._id) } }).select('catalogueProductId');
+    const inBranch = new Set(existing.map((p) => String(p.catalogueProductId)));
+    res.json({ success: true, items: items.map((item) => ({ ...item.toObject(), inBranch: inBranch.has(String(item._id)) })) });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+// Pull catalogue template items into THIS branch as independent products.
+// The branch owns its own price, stock and active flag from that point on.
+router.post('/from-catalogue', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
+  try {
+    const { storeId, catalogueProductIds } = req.body;
+    if (!storeId || !(await hasStoreScope(req, String(storeId)))) {
+      return res.status(403).json({ success: false, error: 'You cannot add catalogue items to this branch.' });
+    }
+    const store = await Store.findById(storeId).select('organizationId');
+    if (!store?.organizationId) return res.status(409).json({ success: false, error: 'This branch must belong to a registered supermarket.' });
+
+    const query: any = { organizationId: store.organizationId, active: true };
+    if (Array.isArray(catalogueProductIds) && catalogueProductIds.length > 0) query._id = { $in: catalogueProductIds };
+    const items = await CatalogueProduct.find(query);
+    if (items.length === 0) return res.status(404).json({ success: false, error: 'No catalogue items found.' });
+
+    let added = 0, skipped = 0;
+    const errors: any[] = [];
+    for (const item of items) {
+      try {
+        const exists = await Product.findOne({
+          storeId,
+          $or: [{ catalogueProductId: item._id }, { barcode: item.barcode }, { barcodeAliases: item.barcode }],
+        }).select('_id');
+        if (exists) { skipped++; continue; }
+        const conflict = await findCodeConflict(storeId, [item.barcode, ...(item.barcodeAliases || []), ...(item.pluCode ? [item.pluCode] : [])]);
+        if (conflict) { errors.push({ item: item.name, error: conflict }); continue; }
+        const product = new Product({
+          storeId, catalogueProductId: item._id, name: item.name, category: item.category,
+          barcode: item.barcode, barcodeAliases: item.barcodeAliases || [], pluCode: item.pluCode,
+          sku: item.sku, priceMinor: item.priceMinor, compareAtPriceMinor: item.compareAtPriceMinor,
+          vatRateBps: item.vatRateBps, isWeighted: item.isWeighted, soldBy: item.soldBy,
+          pricePerKgMinor: item.pricePerKgMinor, requiresSerializedTag: item.requiresSerializedTag,
+          highTheft: item.highTheft, stock: 0, active: true,
+        });
+        if (item.imageData) applyImage(product, item.imageData);
+        await product.save();
+        added++;
+      } catch (err: any) { errors.push({ item: item.name, error: err.message }); }
+    }
+    await logInventory(req, { action: 'CATALOGUE_ITEMS_ADOPTED', entityId: String(storeId), storeId, newValue: { added, skipped, errorCount: errors.length } });
+    res.json({ success: true, summary: { added, skipped, failed: errors.length }, errors: errors.slice(0, 10) });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+router.post('/inventory/receive', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
     const { storeId, barcode, quantity, supplier, deliveryReference, notes } = req.body;
     const code = String(barcode || '').trim();
@@ -530,14 +604,14 @@ router.post('/inventory/receive', authenticate, requirePermission('inventory:wri
   } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
 });
 
-router.get('/inventory/unknown-barcodes', authenticate, requirePermission('inventory:read'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.get('/inventory/unknown-barcodes', authenticate, requirePermission('inventory:read'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   const storeId = String(req.query.storeId || req.user?.storeId || '');
   if (!storeId || !(await hasStoreScope(req, storeId))) return res.status(403).json({ success: false, error: 'Branch scope is required.' });
   const unknownBarcodes = await UnknownBarcode.find({ storeId, status: 'OPEN' }).sort({ lastSeenAt: -1 }).limit(250).lean();
   return res.json({ success: true, unknownBarcodes });
 });
 
-router.get('/inventory/receipts', authenticate, requirePermission('inventory:read'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.get('/inventory/receipts', authenticate, requirePermission('inventory:read'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   const storeId = String(req.query.storeId || req.user?.storeId || '');
   if (!storeId || !(await hasStoreScope(req, storeId))) return res.status(403).json({ success: false, error: 'Branch scope is required.' });
   const receipts = await GoodsReceipt.find({ storeId }).populate('productId', 'name barcode sku').sort({ createdAt: -1 }).limit(100).lean();
@@ -548,7 +622,7 @@ router.get('/inventory/receipts', authenticate, requirePermission('inventory:rea
  * Receive goods whose barcode is not in the catalogue yet. The stock controller only types a name and (optionally) takes a
  * photo. The delivery is held until a catalogue manager prices and approves the product, then it is added to stock.
  */
-router.post('/inventory/receive-new', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/inventory/receive-new', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
     const { storeId, barcode, quantity, supplier, deliveryReference, notes } = req.body;
     const code = String(barcode || '').trim();
@@ -568,7 +642,16 @@ router.post('/inventory/receive-new', authenticate, requirePermission('inventory
       { upsert: true, new: true }
     );
     if (unknown!.productId || existing) {
-      return res.status(202).json({ success: true, pendingApproval: true, message: `Added ${qty} more to the delivery already waiting for approval (${unknown!.pendingReceiveQuantity} in total).` });
+      const storeFilter = Types.ObjectId.isValid(storeId) ? { $in: [String(storeId), new Types.ObjectId(storeId)] } : String(storeId);
+      const activeApproval = await Approval.findOne({
+        targetType: 'PRODUCT',
+        'requestData.barcode': code,
+        'requestData.storeId': storeFilter,
+        status: 'PENDING',
+      });
+      if (activeApproval) {
+        return res.status(202).json({ success: true, pendingApproval: true, approval: activeApproval, message: `Added ${qty} more to the delivery already waiting for approval (${unknown!.pendingReceiveQuantity} in total).` });
+      }
     }
     const priceMinor = req.body.priceMinor === undefined || req.body.priceMinor === '' ? undefined : Number(req.body.priceMinor);
     if (priceMinor !== undefined && (!Number.isInteger(priceMinor) || priceMinor < 0)) throw new HttpError(400, 'Enter a valid selling price.');
@@ -580,7 +663,7 @@ router.post('/inventory/receive-new', authenticate, requirePermission('inventory
   } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
 });
 
-router.post('/inventory/unknown-barcodes/:id/register', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/inventory/unknown-barcodes/:id/register', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
     const unknown = await UnknownBarcode.findById(req.params.id);
     if (!unknown || unknown.status !== 'OPEN') throw new HttpError(404, 'Open unknown barcode not found.');
@@ -602,14 +685,15 @@ router.post('/inventory/unknown-barcodes/:id/register', authenticate, requirePer
   } catch (error: any) { return res.status(error.status || 400).json({ success: false, error: error.message }); }
 });
 
-router.get('/inventory/approvals', authenticate, requireAnyPermission('inventory:approve', 'pricing:approve'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.get('/inventory/approvals', authenticate, requireAnyPermission('inventory:approve', 'pricing:approve'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   const storeId = String(req.query.storeId || req.user?.storeId || '');
   if (!storeId || !(await hasStoreScope(req, storeId))) return res.status(403).json({ success: false, error: 'Branch scope is required.' });
-  const approvals: any[] = await Approval.find({ targetType: 'PRODUCT', 'requestData.storeId': new Types.ObjectId(storeId), status: 'PENDING' }).populate('requestedBy', 'name role').sort({ createdAt: 1 }).lean();
+  const storeFilter = Types.ObjectId.isValid(storeId) ? { $in: [String(storeId), new Types.ObjectId(storeId)] } : String(storeId);
+  const approvals: any[] = await Approval.find({ targetType: 'PRODUCT', 'requestData.storeId': storeFilter, status: 'PENDING' }).populate('requestedBy', 'name role').sort({ createdAt: 1 }).lean();
   const productIds = approvals.filter((a) => a.requestData?.kind === 'PRODUCT_REGISTRATION').map((a) => a.targetId);
   const [drafts, held]: any[] = productIds.length ? await Promise.all([
     Product.find({ _id: { $in: productIds } }).select('name category barcode image priceMinor vatRateBps soldBy pricePerKgMinor pluCode').lean(),
-    UnknownBarcode.find({ storeId, status: 'OPEN', productId: { $in: productIds } }).select('productId pendingReceiveQuantity pendingSupplier pendingDeliveryReference').lean(),
+    UnknownBarcode.find({ storeId: storeFilter, status: 'OPEN', productId: { $in: productIds } }).select('productId pendingReceiveQuantity pendingSupplier pendingDeliveryReference').lean(),
   ]) : [[], []];
   const draftById = new Map<string, any>(drafts.map((d: any) => [String(d._id), d]));
   const heldByProduct = new Map<string, any>(held.map((h: any) => [String(h.productId), h]));
@@ -622,7 +706,7 @@ router.get('/inventory/approvals', authenticate, requireAnyPermission('inventory
   return res.json({ success: true, approvals: enriched });
 });
 
-router.post('/:id/price-change', authenticate, requirePermission('pricing:write'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/:id/price-change', authenticate, requirePermission('pricing:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ success: false, error: 'Product not found.' });
@@ -640,8 +724,14 @@ router.post('/:id/price-change', authenticate, requirePermission('pricing:write'
   } catch (error: any) { return res.status(400).json({ success: false, error: error.message }); }
 });
 
-router.post('/inventory/approvals/:id/decision', authenticate, requireAnyPermission('inventory:approve', 'pricing:approve'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/inventory/approvals/:id/decision', authenticate, requireAnyPermission('inventory:approve', 'pricing:approve'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
+    if (req.user?.role && isPlatformRole(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Super-admin cannot approve store inventory receiving. This action must be performed by the stock manager or catalogue & inventory manager.',
+      });
+    }
     const decision = req.body.decision;
     // Approving needs no typed reason (it defaults to "Approved"); rejecting always does.
     const reason = String(req.body.reason || '').trim() || (decision === 'APPROVED' ? 'Approved' : '');
@@ -739,7 +829,7 @@ router.post('/inventory/approvals/:id/decision', authenticate, requireAnyPermiss
   } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
 });
 
-router.post('/inventory/unknown-barcodes/:id/dismiss', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/inventory/unknown-barcodes/:id/dismiss', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   const unknown = await UnknownBarcode.findById(req.params.id);
   if (!unknown || unknown.status !== 'OPEN') return res.status(404).json({ success: false, error: 'Open unknown barcode not found.' });
   if (!(await hasStoreScope(req, unknown.storeId.toString()))) return res.status(403).json({ success: false, error: 'You cannot dismiss records for this branch.' });
@@ -751,7 +841,7 @@ router.post('/inventory/unknown-barcodes/:id/dismiss', authenticate, requirePerm
 });
 
 // Adjust stock with mandatory reason (Damaged, Theft, Restock, Expired, Cycle Count)
-router.post('/:id/adjust-stock', authenticate, requirePermission('inventory:adjust'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/:id/adjust-stock', authenticate, requirePermission('inventory:adjust'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
     const { quantityChange, reason, adjustmentType } = req.body;
     if (quantityChange === undefined || !reason) {
@@ -807,7 +897,7 @@ router.post('/:id/adjust-stock', authenticate, requirePermission('inventory:adju
 });
 
 // Cycle stock count verification
-router.post('/stock-count', authenticate, requirePermission('inventory:adjust'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/stock-count', authenticate, requirePermission('inventory:adjust'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
     const { counts, storeId } = req.body; // Array of { productId, countedStock, notes }
     if (!Array.isArray(counts)) {
@@ -843,7 +933,7 @@ router.post('/stock-count', authenticate, requirePermission('inventory:adjust'),
 });
 
 // Create product (Admin / Store Manager / Stock Controller)
-router.post('/', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
     delete req.body.image; delete req.body.imageData; // photos go through POST /:id/image
     const storeId = String(req.body.storeId || req.user?.storeId || '');
@@ -882,7 +972,7 @@ router.post('/', authenticate, requirePermission('inventory:write'), requireRole
 });
 
 // Update product / price (Server-Authoritative Price Versioning)
-router.put('/:id', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.put('/:id', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
     delete req.body.image; delete req.body.imageData; // photos go through POST /:id/image
     const product = await Product.findById(req.params.id);
@@ -978,10 +1068,11 @@ router.put('/:id', authenticate, requirePermission('inventory:write'), requireRo
 });
 
 // Add or replace a product photo (shared with the organization catalogue and the same product in every branch)
-router.post('/:id/image', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH'), async (req: AuthRequest, res) => {
+router.post('/:id/image', authenticate, requirePermission('inventory:write'), requireRoleScope('ORG', 'BRANCH', 'REGION'), async (req: AuthRequest, res) => {
   try {
-    if (!Types.ObjectId.isValid(req.params.id)) throw new HttpError(404, 'Product not found.');
-    const product = await Product.findById(req.params.id).select('+imageData');
+    const productId = String(req.params.id);
+    if (!Types.ObjectId.isValid(productId)) throw new HttpError(404, 'Product not found.');
+    const product = await Product.findById(productId).select('+imageData');
     if (!product) throw new HttpError(404, 'Product not found.');
     if (!(await hasStoreScope(req, product.storeId.toString()))) throw new HttpError(403, 'You cannot change photos for this branch.');
     const image = cleanImage(req.body.image);

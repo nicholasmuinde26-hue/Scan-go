@@ -100,6 +100,7 @@ router.post('/plans', authenticate, requirePermission('platform:settings:write')
     gracePeriodDays,
     features,
     pricing: { currency: 'KES', monthlyAmountMinor: pricing.monthlyAmountMinor, annualAmountMinor: pricing.annualAmountMinor },
+    components: Array.isArray(req.body.components) ? req.body.components : undefined,
   });
   res.status(201).json({ success: true, plan });
 }));
@@ -114,6 +115,7 @@ router.patch('/plans/:code', authenticate, requirePermission('platform:settings:
   }
   if (req.body.features) plan.features = { ...(plan.features as any), ...req.body.features };
   if (req.body.pricing) plan.pricing = { ...(plan.pricing as any), currency: 'KES', ...req.body.pricing };
+  if (req.body.components !== undefined) plan.components = req.body.components;
   await plan.save();
 
   await AuditLog.create({

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Scan, ShoppingBag, Search, Plus, Minus, Clock, Check, ArrowRight, CreditCard, MapPin, Flame, BadgePercent, ChevronRight, Store as StoreIcon } from 'lucide-react';
 import { RealCameraScanner } from '../../components/RealCameraScanner.js';
 import { Product, Store } from '../../types.js';
-import { formatKes } from '../../api.js';
+import { formatKes, apiRequest } from '../../api.js';
 import { CheckoutModal } from './CheckoutModal.js';
 import { CustomerOrder, IS_DEV, categoryIcon, depositFor, todayISO } from './customerTypes.js';
 import { useCart } from './useCart.js';
@@ -155,8 +155,21 @@ export const ShopSection: React.FC<Props> = ({ store, products, cart, defaultPho
     window.setTimeout(() => setToast(null), 2500);
   };
 
-  const handleBarcode = (code: string) => {
-    const found = products.find((p) => p.barcode === code.trim());
+  const handleBarcode = async (code: string) => {
+    const trimmed = code.trim();
+    let found = products.find(
+      (p) => p.barcode === trimmed || (p.barcodeAliases || []).includes(trimmed) || p.pluCode === trimmed
+    );
+    if (!found) {
+      try {
+        const res = await apiRequest(`/products/barcode/${encodeURIComponent(trimmed)}?storeId=${store._id}`);
+        if (res?.success && res.product) {
+          found = res.product;
+        }
+      } catch {
+        // Not found
+      }
+    }
     if (!found) {
       setScanError(`Barcode ${code} is not in this store's catalogue.`);
       return false;
@@ -570,9 +583,12 @@ export const ShopSection: React.FC<Props> = ({ store, products, cart, defaultPho
             {scanError && <p role="alert" className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl p-2.5">{scanError}</p>}
             <form
               className="flex gap-2"
-              onSubmit={(e) => {
+              onSubmit={async (e) => {
                 e.preventDefault();
-                if (manualBarcode.trim() && handleBarcode(manualBarcode)) setManualBarcode('');
+                if (manualBarcode.trim()) {
+                  const ok = await handleBarcode(manualBarcode);
+                  if (ok) setManualBarcode('');
+                }
               }}
             >
               <input

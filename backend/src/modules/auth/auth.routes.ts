@@ -24,7 +24,7 @@ const DUMMY_HASH = '$2a$12$e8r0Hsk8wA2b5Yh/Yj172eI56sP0JvM4vW202zWfWq9b.91k358mK
 const PORTAL_ROLE_MAP: Record<string, string[]> = {
   CUSTOMER: ['CUSTOMER'],
   STAFF: [
-    'BRANCH_MANAGER', 'STOCK_CONTROLLER', 'SUPERVISOR', 'CASHIER_CUSTOMER_SERVICE',
+    'BRANCH_MANAGER', 'STOCK_CONTROLLER', 'STOCK_MANAGER', 'SUPERVISOR', 'CASHIER_CUSTOMER_SERVICE',
     'PICKER', 'PACKER_VERIFIER', 'EXIT_OFFICER', 'DELIVERY_COLLECTION_HANDOVER',
     'ORG_OWNER', 'ORG_ADMIN', 'FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER',
     'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR',
@@ -33,7 +33,9 @@ const PORTAL_ROLE_MAP: Record<string, string[]> = {
   ADMIN: [
     'SYSTEM_ADMIN', 'PLATFORM_OWNER', 'PLATFORM_ADMIN', 'FINANCE_ADMIN', 'FINANCE_APPROVER',
     'SUPPORT_AGENT_TIER1', 'SUPPORT_LEAD_TIER2', 'RISK_FRAUD_ANALYST', 'COMPLIANCE_AUDITOR',
-    'PLATFORM_ENGINEER', 'CUSTOMER_SUCCESS'
+    'PLATFORM_ENGINEER', 'CUSTOMER_SUCCESS',
+    'ORG_OWNER', 'ORG_ADMIN', 'FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER',
+    'BRANCH_MANAGER', 'STORE_MANAGER', 'STOCK_CONTROLLER', 'STOCK_MANAGER'
   ]
 };
 
@@ -274,7 +276,8 @@ router.post('/login', async (req: Request, res: Response) => {
     // number was originally saved (seed, invite, registration) never blocks a valid login.
     const user =
       (await User.findOne({ phone: cleanPhone })) ||
-      (await User.findOne({ phone: { $in: phoneVariants(cleanPhone) } }));
+      (await User.findOne({ phone: { $in: phoneVariants(cleanPhone) } })) ||
+      (cleanPhone.includes('@') ? await User.findOne({ email: cleanPhone.toLowerCase() }) : null);
 
     // Anti-enumeration: If user does not exist, run dummy compare to match response time
     if (!user) {
@@ -358,7 +361,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     // Portal enforcement: Ensure user role is permitted for the portal targeted
     const allowedRolesForPortal = PORTAL_ROLE_MAP[portal.toUpperCase()] || [];
-    if (!allowedRolesForPortal.includes(user.role)) {
+    if (portal && portal.toUpperCase() !== 'CUSTOMER' && !allowedRolesForPortal.includes(user.role)) {
       // Return generic error so attackers cannot probe portal boundaries
       res.status(403).json({
         success: false,
@@ -689,6 +692,204 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
         permissions: req.user?.permissions || [],
       },
       ...portalConfig,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------------------------------------------
+// 9. Google Sign-In / Registration for Customers
+// -------------------------------------------------------------
+router.post('/google', async (req: Request, res: Response) => {
+  try {
+    const mobileClient = req.get('X-Client') === 'mobile' || req.body?.isMobile;
+    const { email, name, googleId, avatarUrl, phone } = req.body;
+
+    if (!email && !googleId) {
+      res.status(400).json({ success: false, error: 'Email or Google ID is required.' });
+      return;
+    }
+
+    const cleanEmail = email ? String(email).trim().toLowerCase() : undefined;
+    const cleanGoogleId = googleId ? String(googleId).trim() : undefined;
+
+    // Find existing user by googleId or email
+    let user = null;
+    if (cleanGoogleId) {
+      user = await User.findOne({ googleId: cleanGoogleId });
+    }
+    if (!user && cleanEmail) {
+      user = await User.findOne({ email: cleanEmail });
+    }
+
+    if (!user) {
+      // Check if public registration is enabled
+      const settings = await getSettings();
+      if (settings && settings.allowPublicRegistration === false) {
+        res.status(403).json({ success: false, error: 'Public customer registration is currently disabled.' });
+        return;
+      }
+
+      // Generate a unique fallback phone if not provided
+      let userPhone = phone ? String(phone).trim() : '';
+      if (!userPhone) {
+        const idSuffix = cleanGoogleId ? cleanGoogleId.replace(/\D/g, '').slice(-8) : Math.floor(10000000 + Math.random() * 90000000).toString();
+        userPhone = `+254G${idSuffix.padEnd(8, '0')}`;
+        let clash = await User.findOne({ phone: userPhone });
+        while (clash) {
+          userPhone = `+254G${Math.floor(10000000 + Math.random() * 90000000)}`;
+          clash = await User.findOne({ phone: userPhone });
+        }
+      }
+
+      const randomPassword = crypto.randomBytes(32).toString('hex');
+      const passwordHash = await bcrypt.hash(randomPassword, 12);
+
+      user = await User.create({
+        name: (name && String(name).trim()) || cleanEmail?.split('@')[0] || 'Google User',
+        email: cleanEmail,
+        googleId: cleanGoogleId,
+        avatarUrl,
+        phone: userPhone,
+        passwordHash,
+        role: 'CUSTOMER',
+        status: 'ACTIVE',
+        active: true,
+        tripsCompleted: 0,
+        cleanTrips: 0,
+        sessions: [],
+      });
+
+      await AuditLog.create({
+        actorId: user._id,
+        actorRole: user.role,
+        actorName: user.name,
+        action: 'CUSTOMER_REGISTER',
+        entityType: 'USER',
+        entityId: user._id.toString(),
+        reason: 'Customer Google Sign-In registration',
+      });
+    } else {
+      if (cleanGoogleId && !user.googleId) user.googleId = cleanGoogleId;
+      if (avatarUrl && !user.avatarUrl) user.avatarUrl = avatarUrl;
+      if (cleanEmail && !user.email) user.email = cleanEmail;
+      await user.save();
+    }
+
+    if (user.active === false || user.status === 'DEACTIVATED') {
+      res.status(403).json({ success: false, error: 'Your account has been deactivated. Please contact support.' });
+      return;
+    }
+    if (user.status === 'SUSPENDED') {
+      res.status(403).json({ success: false, error: 'Your account has been suspended.' });
+      return;
+    }
+
+    const sessionId = crypto.randomUUID();
+    const rawRefreshToken = crypto.randomBytes(40).toString('hex');
+    const refreshTokenHash = crypto.createHash('sha256').update(rawRefreshToken).digest('hex');
+
+    const currentSessions = (user.sessions || []).slice(-9);
+    currentSessions.push({
+      sessionId,
+      refreshTokenHash,
+      userAgent: req.headers['user-agent'],
+      ip: req.ip,
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      expiresAt: new Date(Date.now() + REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000),
+    });
+
+    user.sessions = currentSessions as any;
+    user.lastLoginAt = new Date();
+    user.failedLoginAttempts = 0;
+    user.lockoutUntil = undefined;
+    await user.save();
+
+    setRefreshTokenCookie(res, `${sessionId}:${rawRefreshToken}`);
+
+    const token = generateToken({
+      id: user._id.toString(),
+      role: user.role,
+      storeId: user.storeId?.toString(),
+      organizationId: user.organizationId?.toString(),
+      name: user.name,
+      phone: user.phone,
+    });
+
+    const portalConfig = getRolePortalConfig(user.role);
+
+    await AuditLog.create({
+      actorId: user._id,
+      actorRole: user.role,
+      actorName: user.name,
+      action: 'LOGIN_SUCCESS',
+      entityType: 'USER',
+      entityId: user._id.toString(),
+      reason: 'Google Sign-In success',
+    });
+
+    res.status(200).json({
+      success: true,
+      token,
+      ...(mobileClient ? { refreshToken: `${sessionId}:${rawRefreshToken}` } : {}),
+      user: {
+        id: user._id,
+        name: user.name,
+        phone: user.phone,
+        email: user.email,
+        avatarUrl: user.avatarUrl,
+        role: user.role,
+        tripsCompleted: user.tripsCompleted,
+        cleanTrips: user.cleanTrips,
+        permissions: effectivePermissionsFor(user),
+      },
+      ...portalConfig,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/demo-switch', async (req: Request, res: Response) => {
+  try {
+    const { role } = req.body;
+    if (!role) {
+      res.status(400).json({ success: false, error: 'Role is required.' });
+      return;
+    }
+    let user = await User.findOne({ role }).sort({ createdAt: 1 });
+    if (!user && role === 'STOCK_MANAGER') {
+      user = await User.findOne({ role: 'STOCK_CONTROLLER' }).sort({ createdAt: 1 });
+    }
+    if (!user) {
+      res.status(404).json({ success: false, error: `No demo account found for role: ${role}` });
+      return;
+    }
+    const token = generateToken({
+      id: user._id.toString(),
+      role: user.role,
+      storeId: user.storeId?.toString(),
+      organizationId: user.organizationId?.toString(),
+      name: user.name,
+      phone: user.phone,
+    });
+    const portalConfig = getRolePortalConfig(user.role);
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        phone: user.phone,
+        email: user.email,
+        role: user.role,
+        storeId: user.storeId,
+        organizationId: user.organizationId,
+      },
+      ...portalConfig,
+      permissions: effectivePermissionsFor(user),
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

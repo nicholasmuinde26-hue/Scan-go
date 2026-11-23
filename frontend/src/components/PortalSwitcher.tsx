@@ -83,6 +83,8 @@ export const PortalSwitcher: React.FC<PortalSwitcherProps> = ({
     currentUser?.role === 'BRANCH_MANAGER' ||
     currentUser?.role === 'ORG_ADMIN' ||
     currentUser?.role === 'ORG_OWNER' ||
+    currentUser?.role === 'GENERAL_MANAGER' ||
+    currentUser?.role === 'REGION_MANAGER' ||
     currentUser?.role === 'STOCK_CONTROLLER' ||
     currentUser?.role === 'CATALOGUE_INVENTORY_MANAGER' ||
     currentUser?.role === 'LOSS_PREVENTION_MANAGER' ||

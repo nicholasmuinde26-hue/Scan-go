@@ -19,7 +19,7 @@ import RetentionRequest from './compliance.model.js';
 import ApiKey from './apiKey.model.js';
 import WebhookLog from './webhookLog.model.js';
 import AuditLog from '../audits/audit.model.js';
-import { authenticate, authorize, AuthRequest, ROLE_PERMISSIONS, Permission, isPlatformRole, canonicalRole } from '../../middleware/auth.js';
+import { authenticate, authorize, canAccessOrganization, AuthRequest, ROLE_PERMISSIONS, Permission, isPlatformRole, canonicalRole, SUBADMIN_PERMISSION_CATALOG, SUBADMIN_FORBIDDEN, filterGrantablePermissions } from '../../middleware/auth.js';
 import { getSettings, updateSettings } from './systemSettings.model.js';
 import Subscription from '../subscriptions/subscription.model.js';
 import {
@@ -36,6 +36,7 @@ const router = Router();
 // A caller needs ANY ONE of the listed permissions. system:admin (platform owner / super admin) covers all.
 const SECTION_RULES: { prefix: string; read: Permission[]; write: Permission[] }[] = [
   { prefix: '/overview', read: ['platform:overview:read'], write: [] },
+  { prefix: '/activity', read: ['platform:overview:read'], write: [] },
   { prefix: '/organizations', read: ['platform:orgs:read'], write: ['platform:orgs:create', 'platform:orgs:suspend', 'org:users:manage'] },
   { prefix: '/stores', read: ['platform:orgs:read'], write: ['platform:orgs:suspend', 'org:config'] },
   // The global user directory is a platform-owner/admin-console capability. Tenant staff are managed
@@ -85,6 +86,17 @@ const handle =
 
 const fail = (status: number, message: string) => Object.assign(new Error(message), { status });
 
+// Organization-scoped routes: sub-admins restricted via managedOrganizationIds get 404,
+// not 403, so they cannot probe which supermarkets exist.
+const requireOrgScope = (req: AuthRequest, res: Response, next: () => void) => {
+  const orgId = req.params.id || (req.params as any).organizationId;
+  if (orgId && !canAccessOrganization(req.user!, String(orgId))) {
+    res.status(404).json({ success: false, error: 'Organization not found.' });
+    return;
+  }
+  next();
+};
+
 async function audit(req: AuthRequest, action: string, entityType: any, entityId: string, extra: any = {}) {
   await AuditLog.create({
     actorId: req.user?.id,
@@ -107,6 +119,9 @@ const publicUser = (u: any) => ({
   active: u.active !== false,
   organizationId: u.organizationId,
   storeId: u.storeId,
+  jobTitle: u.jobTitle,
+  managedOrganizationIds: (u.managedOrganizationIds || []).map(String),
+  permissionOverrides: u.permissionOverrides,
   createdAt: u.createdAt,
 });
 
@@ -252,11 +267,72 @@ router.get('/overview', handle(async (_req, res) => {
 }));
 
 /* ==========================================================================
+   1b. LIVE ACTIVITY: who is online right now, per supermarket and platform-wide
+   ========================================================================== */
+
+const ONLINE_WINDOW_MS = 15 * 60 * 1000;
+
+router.get('/activity', handle(async (req, res) => {
+  const cutoff = new Date(Date.now() - ONLINE_WINDOW_MS);
+  const users = await User.find({ 'sessions.lastActiveAt': { $gte: cutoff } })
+    .select('name phone role organizationId storeId status lastLoginAt sessions')
+    .populate('organizationId', 'name slug')
+    .populate('storeId', 'name code')
+    .lean();
+
+  const sessions: any[] = [];
+  for (const u of users as any[]) {
+    for (const s of u.sessions || []) {
+      if (s.lastActiveAt && new Date(s.lastActiveAt) >= cutoff) {
+        sessions.push({
+          userId: u._id,
+          name: u.name,
+          phone: u.phone,
+          role: u.role,
+          status: u.status,
+          organizationId: u.organizationId?._id || u.organizationId,
+          organizationName: u.organizationId?.name || null,
+          storeId: u.storeId?._id || u.storeId,
+          storeName: u.storeId?.name || null,
+          lastActiveAt: s.lastActiveAt,
+          ip: s.ip,
+          userAgent: s.userAgent,
+        });
+      }
+    }
+  }
+  sessions.sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime());
+
+  const managedOrgs = req.user?.managedOrganizationIds || [];
+  const orgFilter = managedOrgs.length > 0 ? { _id: { $in: managedOrgs } } : {};
+  const [activeOrganizations, openTickets] = await Promise.all([
+    Organization.countDocuments({ status: 'ACTIVE', ...orgFilter }),
+    SupportTicket.countDocuments({ status: { $in: ['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_CUSTOMER'] }, ...(managedOrgs.length ? { organizationId: { $in: managedOrgs } } : {}) }),
+  ]);
+
+  res.json({
+    success: true,
+    onlineWindowMinutes: ONLINE_WINDOW_MS / 60000,
+    counts: {
+      activeOrganizations,
+      activeSessions: sessions.length,
+      onlineStaff: new Set(sessions.map((s) => s.userId.toString())).size,
+      onlineAdmins: sessions.filter((s) => ['PLATFORM_OWNER', 'PLATFORM_ADMIN', 'ORG_OWNER', 'ORG_ADMIN', 'GENERAL_MANAGER'].includes(s.role)).length,
+      openTickets,
+    },
+    sessions: sessions.slice(0, 100),
+  });
+}));
+
+/* ==========================================================================
    2. ORGANIZATIONS: Lifecycle, Branding, Contacts, Flags, Limits, Drilldown
    ========================================================================== */
 
-router.get('/organizations', handle(async (_req, res) => {
-  const orgs = await Organization.find().sort({ createdAt: -1 }).lean();
+router.get('/organizations', handle(async (req, res) => {
+  // Sub-admins restricted to specific supermarkets only see those organizations.
+  const managedOrgs = req.user?.managedOrganizationIds || [];
+  const filter: any = managedOrgs.length > 0 ? { _id: { $in: managedOrgs } } : {};
+  const orgs = await Organization.find(filter).sort({ createdAt: -1 }).lean();
   const withCounts = await Promise.all(
     orgs.map(async (o) => {
       const [{ subscription, plan }, storeCount, adminCount, orderCount] = await Promise.all([
@@ -342,7 +418,7 @@ router.post('/organizations', authorize('PLATFORM_OWNER', 'PLATFORM_ADMIN'), han
 }));
 
 // Lifecycle update: Suspend, Reactivate, Verify, Archive, Edit Branding, Feature Flags, Contacts
-router.patch('/organizations/:id', handle(async (req, res) => {
+router.patch('/organizations/:id', requireOrgScope, handle(async (req, res) => {
   const org = await Organization.findById(req.params.id);
   if (!org) throw fail(404, 'Workspace not found.');
   const before = org.toObject();
@@ -378,7 +454,7 @@ router.patch('/organizations/:id', handle(async (req, res) => {
 }));
 
 // Organization drilldown details
-router.get('/organizations/:id/drilldown', handle(async (req, res) => {
+router.get('/organizations/:id/drilldown', requireOrgScope, handle(async (req, res) => {
   const org = await Organization.findById(req.params.id).lean();
   if (!org) throw fail(404, 'Organization not found.');
 
@@ -421,7 +497,7 @@ router.get('/organizations/:id/drilldown', handle(async (req, res) => {
 }));
 
 // Reset admin password
-router.post('/organizations/:id/reset-admin-password', authorize('PLATFORM_OWNER', 'PLATFORM_ADMIN'), handle(async (req, res) => {
+router.post('/organizations/:id/reset-admin-password', authorize('PLATFORM_OWNER', 'PLATFORM_ADMIN'), requireOrgScope, handle(async (req, res) => {
   const { adminId } = req.body;
   const user = await User.findOne({ _id: adminId, organizationId: req.params.id, role: { $in: ['ORG_OWNER', 'ORG_ADMIN'] } });
   if (!user) throw fail(404, 'Admin not found in this organization.');
@@ -445,7 +521,7 @@ router.post('/organizations/:id/reset-admin-password', authorize('PLATFORM_OWNER
 }));
 
 // Invite or add admin
-router.post('/organizations/:id/admins', authorize('PLATFORM_OWNER', 'PLATFORM_ADMIN'), handle(async (req, res) => {
+router.post('/organizations/:id/admins', authorize('PLATFORM_OWNER', 'PLATFORM_ADMIN'), requireOrgScope, handle(async (req, res) => {
   const org = await Organization.findById(req.params.id);
   if (!org) throw fail(404, 'Workspace not found.');
 
@@ -477,7 +553,7 @@ router.post('/organizations/:id/admins', authorize('PLATFORM_OWNER', 'PLATFORM_A
   res.status(201).json({ success: true, admin: publicUser(user), temporaryPassword: password });
 }));
 
-router.delete('/organizations/:id/admins/:userId', authorize('PLATFORM_OWNER', 'PLATFORM_ADMIN'), handle(async (req, res) => {
+router.delete('/organizations/:id/admins/:userId', authorize('PLATFORM_OWNER', 'PLATFORM_ADMIN'), requireOrgScope, handle(async (req, res) => {
   const u = await User.findOne({ _id: req.params.userId, organizationId: req.params.id, role: 'ORG_ADMIN' });
   if (!u) throw fail(404, 'Admin not found in this workspace.');
   const remaining = await User.countDocuments({ organizationId: req.params.id, role: 'ORG_ADMIN' });
@@ -668,15 +744,128 @@ router.get('/permissions/matrix', handle(async (_req, res) => {
 }));
 
 /* ==========================================================================
+   4b. SUB-ADMIN MANAGEMENT: permission-built platform staff
+   ========================================================================== */
+
+// The grantable catalog for the permission-builder UI.
+router.get('/permissions/subadmin-catalog', handle(async (_req, res) => {
+  res.json({ success: true, catalog: SUBADMIN_PERMISSION_CATALOG, forbidden: SUBADMIN_FORBIDDEN });
+}));
+
+// List platform staff (owners, admins, sub-admins) with their granted permissions and org scope.
+router.get('/users/subadmins', authorize('PLATFORM_OWNER', 'PLATFORM_ADMIN'), handle(async (_req, res) => {
+  const staff = await User.find({
+    role: { $in: ['PLATFORM_OWNER', 'PLATFORM_ADMIN', 'PLATFORM_SUBADMIN', 'FINANCE_ADMIN', 'FINANCE_APPROVER', 'SUPPORT_AGENT_TIER1', 'SUPPORT_LEAD_TIER2', 'RISK_FRAUD_ANALYST', 'COMPLIANCE_AUDITOR', 'PLATFORM_ENGINEER', 'CUSTOMER_SUCCESS'] },
+  })
+    .select('name phone email role jobTitle status active managedOrganizationIds permissionOverrides lastLoginAt createdAt')
+    .sort({ createdAt: -1 })
+    .lean();
+  res.json({ success: true, staff });
+}));
+
+const catalogPermissions = new Set(SUBADMIN_PERMISSION_CATALOG.flatMap((g) => g.permissions));
+
+// Create a permission-built sub-admin. Only the platform owner appoints sub-admins.
+router.post('/users/subadmins', authorize('PLATFORM_OWNER'), handle(async (req, res) => {
+  const { name, phone, email, jobTitle, permissions, managedOrganizationIds } = req.body;
+  if (!name || !phone) throw fail(400, 'Name and phone are required.');
+
+  const existing = await User.findOne({ phone: String(phone).trim() });
+  if (existing) throw fail(409, 'A user with this phone number already exists.');
+
+  // Only catalog permissions, minus owner-only powers, within the platform ceiling.
+  const requested = Array.isArray(permissions) ? permissions : [];
+  const granted = filterGrantablePermissions('PLATFORM_SUBADMIN', requested as Permission[])
+    .filter((p) => catalogPermissions.has(p) && !SUBADMIN_FORBIDDEN.includes(p));
+  const dropped = requested.filter((p: string) => !granted.includes(p as Permission));
+
+  const orgIds = Array.isArray(managedOrganizationIds) ? managedOrganizationIds.map(String).filter(Boolean) : [];
+  if (orgIds.length > 0) {
+    const found = await Organization.countDocuments({ _id: { $in: orgIds } });
+    if (found !== new Set(orgIds).size) throw fail(400, 'One or more organizations were not found.');
+  }
+
+  const password = tempPassword();
+  const user = await User.create({
+    name: String(name).trim(),
+    phone: String(phone).trim(),
+    email: email ? String(email).trim() : undefined,
+    passwordHash: await bcrypt.hash(password, 10),
+    role: 'PLATFORM_SUBADMIN',
+    jobTitle: jobTitle ? String(jobTitle).trim() : undefined,
+    managedOrganizationIds: orgIds,
+    permissionOverrides: { granted, revoked: [] },
+    mustChangePassword: true,
+    mfaEnabled: false,
+  });
+
+  await audit(req, 'CREATE_PLATFORM_SUBADMIN', 'USER', user._id.toString(), {
+    newValue: { name: user.name, phone: user.phone, jobTitle: user.jobTitle, granted, managedOrganizationIds: orgIds, dropped },
+    reason: 'Platform sub-admin appointed',
+  });
+
+  res.status(201).json({ success: true, user: publicUser(user), temporaryPassword: password, droppedPermissions: dropped });
+}));
+
+// Update a sub-admin's title, permission set or organization scope. Owner only.
+router.patch('/users/:id/subadmin', authorize('PLATFORM_OWNER'), handle(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) throw fail(404, 'User not found.');
+  if (user.role !== 'PLATFORM_SUBADMIN') throw fail(400, 'This endpoint only manages PLATFORM_SUBADMIN accounts.');
+  if (canonicalRole(req.user!.role) === canonicalRole(user.role) && req.user!.id === user._id.toString()) {
+    throw fail(403, 'You cannot edit your own sub-admin profile.');
+  }
+
+  const { jobTitle, permissions, managedOrganizationIds, revoked } = req.body;
+  const previous = { jobTitle: user.jobTitle, permissionOverrides: user.permissionOverrides, managedOrganizationIds: user.managedOrganizationIds };
+
+  if (jobTitle !== undefined) user.jobTitle = jobTitle ? String(jobTitle).trim() : undefined;
+  if (Array.isArray(permissions)) {
+    const granted = filterGrantablePermissions('PLATFORM_SUBADMIN', permissions as Permission[])
+      .filter((p) => catalogPermissions.has(p) && !SUBADMIN_FORBIDDEN.includes(p));
+    user.permissionOverrides = { ...(user.permissionOverrides || { granted: [], revoked: [] }), granted };
+  }
+  if (Array.isArray(revoked)) {
+    user.permissionOverrides = { ...(user.permissionOverrides || { granted: [], revoked: [] }), revoked: revoked as Permission[] };
+  }
+  if (managedOrganizationIds !== undefined) {
+    const orgIds = Array.isArray(managedOrganizationIds) ? managedOrganizationIds.map(String).filter(Boolean) : [];
+    if (orgIds.length > 0) {
+      const found = await Organization.countDocuments({ _id: { $in: orgIds } });
+      if (found !== new Set(orgIds).size) throw fail(400, 'One or more organizations were not found.');
+    }
+    user.managedOrganizationIds = orgIds as any;
+  }
+
+  await user.save();
+  await audit(req, 'UPDATE_PLATFORM_SUBADMIN', 'USER', user._id.toString(), {
+    previousValue: previous,
+    newValue: { jobTitle: user.jobTitle, permissionOverrides: user.permissionOverrides, managedOrganizationIds: user.managedOrganizationIds },
+    reason: req.body.reason || 'Sub-admin permission/scope update',
+  });
+
+  res.json({ success: true, user: publicUser(user) });
+}));
+
+/* ==========================================================================
    5. SUPPORT DESK: Ticketing, Escalation (Tier 1 -> Tier 2), SLA, Messages
    ========================================================================== */
 
 router.get('/tickets', handle(async (req, res) => {
-  const { status, priority, tier } = req.query;
+  const { status, priority, tier, organizationId } = req.query;
   const filter: any = {};
   if (status) filter.status = status;
   if (priority) filter.priority = priority;
   if (tier) filter.tier = tier;
+  if (organizationId) filter.organizationId = organizationId;
+  const managedOrgs = req.user?.managedOrganizationIds || [];
+  if (managedOrgs.length > 0) {
+    if (organizationId) {
+      if (!managedOrgs.includes(String(organizationId))) filter.organizationId = { $in: [] };
+    } else {
+      filter.organizationId = { $in: managedOrgs };
+    }
+  }
 
   const tickets = await SupportTicket.find(filter).sort({ createdAt: -1 }).limit(100).lean();
   res.json({ success: true, tickets });

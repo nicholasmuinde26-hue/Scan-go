@@ -9,6 +9,16 @@ export interface ISubscriptionFeatures {
   multiStore: boolean;
 }
 
+export type SubscriptionComponentType = 'BASE' | 'PER_BRANCH' | 'PER_STAFF' | 'PER_TRANSACTION' | 'USAGE';
+
+export interface ISubscriptionPriceComponent {
+  type: SubscriptionComponentType;
+  label: string;
+  amountMinor: number; // per-unit price for PER_* types; flat amount for BASE/USAGE
+  includedUnits?: number; // free allowance (branches/staff/transactions)
+  active: boolean;
+}
+
 export interface ISubscriptionPlan extends Document {
   code: string;
   name: string;
@@ -25,6 +35,9 @@ export interface ISubscriptionPlan extends Document {
     monthlyAmountMinor: number;
     annualAmountMinor: number;
   };
+  // Hybrid billing components. When present and non-empty they take precedence
+  // over the flat pricing fields for invoice generation.
+  components?: ISubscriptionPriceComponent[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -59,6 +72,13 @@ const subscriptionPlanSchema = new Schema<ISubscriptionPlan>(
       monthlyAmountMinor: { type: Number, required: true, min: 0 },
       annualAmountMinor: { type: Number, required: true, min: 0 },
     },
+    components: [{
+      type: { type: String, enum: ['BASE', 'PER_BRANCH', 'PER_STAFF', 'PER_TRANSACTION', 'USAGE'], required: true },
+      label: { type: String, required: true },
+      amountMinor: { type: Number, required: true, min: 0 },
+      includedUnits: { type: Number, default: 0, min: 0 },
+      active: { type: Boolean, default: true },
+    }],
   },
   { timestamps: true }
 );

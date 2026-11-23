@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
 import Organization, { OrganizationStatus } from '../modules/organizations/organization.model.js';
 import Store from '../modules/stores/store.model.js';
-import { AuthRequest } from './auth.js';
+import { AuthRequest, isPlatformRole, isOrgRole } from './auth.js';
 
 export interface TenantContext {
   organizationId?: string;
@@ -30,8 +30,8 @@ export async function requireTenantContext(req: AuthRequest, res: Response, next
   }
 
   const tenantContext: TenantContext = {
-    isSystemAdmin: req.user.role === 'SYSTEM_ADMIN',
-    isOrgAdmin: req.user.role === 'ORG_ADMIN',
+    isSystemAdmin: isPlatformRole(req.user.role),
+    isOrgAdmin: isOrgRole(req.user.role),
     isCustomer: req.user.role === 'CUSTOMER',
   };
 
@@ -113,11 +113,20 @@ export async function requireTenantContext(req: AuthRequest, res: Response, next
       }
     }
   }
-  // Store staff (STORE_MANAGER, SUPERVISOR, PICKER, EXIT_STAFF) are scoped to their store
-  else if (req.user.storeId) {
-    const store = await Store.findById(req.user.storeId);
-    if (!store) {
+  // Store/region staff (BRANCH_MANAGER, REGION_MANAGER, STOCK_CONTROLLER, etc.) are scoped to their store(s)
+  else if (req.user.storeId || (req.user.managedStoreIds && req.user.managedStoreIds.length > 0)) {
+    // Region managers may not have a single home store; their scope is managedStoreIds.
+    const homeStoreId = req.user.storeId || req.user.managedStoreIds?.[0];
+    const store = homeStoreId ? await Store.findById(homeStoreId) : null;
+    if (homeStoreId && !store) {
       res.status(404).json({ success: false, error: 'Assigned store not found.' });
+      return;
+    }
+    if (!store) {
+      // No resolvable store: still attach org context below via managed stores is skipped;
+      // region scoping is enforced by scopeToStore/canAccessStore on real routes.
+      (req as any).tenant = { ...tenantContext, isSystemAdmin: false, isOrgAdmin: false, isCustomer: false };
+      next();
       return;
     }
 

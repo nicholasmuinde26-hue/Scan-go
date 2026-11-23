@@ -22,9 +22,12 @@ import actAsRoutes from './modules/act-as/actAs.routes.js';
 import dataMaskingRoutes from './modules/data-masking/dataMasking.routes.js';
 import supportRoutes from './modules/support/support.routes.js';
 import customerSupportRoutes from './modules/support/customerSupport.routes.js';
+import organizationSupportRoutes from './modules/support/organizationSupport.routes.js';
 import mfaRoutes from './modules/mfa/mfa.routes.js';
 import accessReviewRoutes from './modules/access-review/accessReview.routes.js';
 import subscriptionRoutes from './modules/subscriptions/subscription.routes.js';
+import structureRoutes from './modules/organizations/structure.routes.js';
+import billingRoutes from './modules/billing/billing.routes.js';
 import presenceRoutes from './modules/presence/presence.routes.js';
 import { handleSseConnection } from './shared/utils/eventStream.js';
 import { ENV } from './config/environment.js';
@@ -108,10 +111,13 @@ export function createApp() {
   app.use('/api/v1/data-masking', dataMaskingRoutes);
   // Customer-facing help desk (must be mounted before the staff support router)
   app.use('/api/v1/support/my', customerSupportRoutes);
+  app.use('/api/v1/support/org', organizationSupportRoutes);
   app.use('/api/v1/support', supportRoutes);
   app.use('/api/v1/mfa', mfaRoutes);
   app.use('/api/v1/access-review', accessReviewRoutes);
   app.use('/api/v1/subscriptions', subscriptionRoutes);
+  app.use('/api/v1/org-structure', structureRoutes);
+  app.use('/api/v1/billing', billingRoutes);
 
   // Global error handler
   app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

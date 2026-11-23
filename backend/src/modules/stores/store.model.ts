@@ -15,6 +15,7 @@ export interface IStore extends Document {
   location: string;
   active: boolean;
   organizationId?: Schema.Types.ObjectId;
+  regionId?: Schema.Types.ObjectId;
   managerId?: Schema.Types.ObjectId;
   openHours?: {
     openingTime: string;
@@ -90,6 +91,7 @@ const storeSchema = new Schema<IStore>(
     location: { type: String, required: true },
     active: { type: Boolean, default: true },
     organizationId: { type: Schema.Types.ObjectId, ref: 'Organization' },
+    regionId: { type: Schema.Types.ObjectId, ref: 'Region' },
     managerId: { type: Schema.Types.ObjectId, ref: 'User' },
     openHours: {
       openingTime: { type: String, default: '08:00' },

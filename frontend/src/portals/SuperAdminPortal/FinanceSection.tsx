@@ -22,7 +22,10 @@ interface FinanceSectionProps {
 }
 
 export const FinanceSection: React.FC<FinanceSectionProps> = ({ organizations, stores }) => {
-  const [activeTab, setActiveTab] = useState<'PAYOUTS' | 'LEDGER' | 'RECONCILIATION'>('PAYOUTS');
+  const [activeTab, setActiveTab] = useState<'PAYOUTS' | 'LEDGER' | 'RECONCILIATION' | 'INVOICES'>('PAYOUTS');
+  const [invoices, setInvoices] = useState<any[]>([]);
+  const [invoiceOrgId, setInvoiceOrgId] = useState('');
+  const [payForm, setPayForm] = useState<{ invoiceId: string; amountKes: string; method: string; reference: string } | null>(null);
 
   // Payouts state
   const [payouts, setPayouts] = useState<any[]>([]);
@@ -59,7 +62,29 @@ export const FinanceSection: React.FC<FinanceSectionProps> = ({ organizations, s
 
   useEffect(() => {
     loadFinanceOverview();
+    apiRequest('/billing/invoices').then((r) => r?.success && setInvoices(r.invoices || [])).catch(() => {});
   }, []);
+
+  const loadInvoices = () => apiRequest('/billing/invoices').then((r) => r?.success && setInvoices(r.invoices || [])).catch(() => {});
+
+  const handleGenerateInvoice = async () => {
+    if (!invoiceOrgId) return;
+    try {
+      const res = await apiRequest('/billing/invoices/generate', { method: 'POST', body: JSON.stringify({ organizationId: invoiceOrgId, issue: true }) });
+      if (res?.success) { setMsg({ type: 'success', text: `Invoice ${res.invoice.invoiceNumber} issued — ${formatKes(res.invoice.totalMinor)}` }); loadInvoices(); }
+    } catch (e: any) { setMsg({ type: 'error', text: e.message }); }
+  };
+
+  const handleRecordPayment = async () => {
+    if (!payForm) return;
+    try {
+      const res = await apiRequest(`/billing/invoices/${payForm.invoiceId}/payments`, {
+        method: 'POST',
+        body: JSON.stringify({ amountMinor: Math.round(Number(payForm.amountKes) * 100), method: payForm.method, reference: payForm.reference || undefined }),
+      });
+      if (res?.success) { setMsg({ type: 'success', text: `Payment recorded — status: ${res.invoice.status}` }); setPayForm(null); loadInvoices(); }
+    } catch (e: any) { setMsg({ type: 'error', text: e.message }); }
+  };
 
   const handleRequestPayout = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -158,6 +183,14 @@ export const FinanceSection: React.FC<FinanceSectionProps> = ({ organizations, s
             >
               General Ledger
             </button>
+            <button
+              onClick={() => setActiveTab('INVOICES')}
+              className={`px-3 py-1.5 rounded-lg transition ${
+                activeTab === 'INVOICES' ? 'bg-navy-600 text-white shadow-xs' : 'text-slate-600 hover:text-navy-800'
+              }`}
+            >
+              Subscription Invoices
+            </button>
           </div>
 
           <button
@@ -170,7 +203,67 @@ export const FinanceSection: React.FC<FinanceSectionProps> = ({ organizations, s
         </div>
       </div>
 
-      {activeTab === 'PAYOUTS' ? (
+      {activeTab === 'INVOICES' ? (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-navy-800">Subscription Invoices (KES, VAT-inclusive)</h3>
+            <div className="flex items-center gap-2">
+              <select value={invoiceOrgId} onChange={(e) => setInvoiceOrgId(e.target.value)} className="border border-slate-200 rounded-xl px-3 py-1.5 text-xs bg-white">
+                <option value="">Select supermarket…</option>
+                {organizations.map((o) => <option key={o._id} value={o._id}>{o.name}</option>)}
+              </select>
+              <button onClick={handleGenerateInvoice} disabled={!invoiceOrgId} className="px-3 py-1.5 bg-brand-600 text-white rounded-xl text-xs font-semibold disabled:opacity-40">Generate & issue</button>
+            </div>
+          </div>
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
+            <table className="w-full text-xs text-left">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-semibold uppercase tracking-wider text-[10px]">
+                  <th className="py-3 px-4">Invoice</th>
+                  <th>Supermarket</th>
+                  <th>Period</th>
+                  <th>Total</th>
+                  <th>Paid</th>
+                  <th>Status</th>
+                  <th className="text-right px-4">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-slate-700">
+                {invoices.map((inv) => {
+                  const org = organizations.find((o) => String(o._id) === String(inv.organizationId));
+                  return (
+                    <tr key={inv._id} className="hover:bg-slate-50">
+                      <td className="py-2.5 px-4 font-mono text-[11px]">{inv.invoiceNumber}</td>
+                      <td className="font-bold text-navy-800">{org?.name || 'Unknown org'}</td>
+                      <td className="text-slate-500">{new Date(inv.periodStart).toLocaleDateString()} → {new Date(inv.periodEnd).toLocaleDateString()}</td>
+                      <td className="font-bold text-navy-800">{formatKes(inv.totalMinor)}</td>
+                      <td>{formatKes(inv.amountPaidMinor)}</td>
+                      <td>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${inv.status === 'PAID' ? 'bg-brand-100 text-brand-800' : inv.status === 'OVERDUE' || inv.status === 'VOID' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800'}`}>{inv.status}</span>
+                      </td>
+                      <td className="text-right px-4">
+                        {['ISSUED', 'PARTIAL', 'OVERDUE'].includes(inv.status) && payForm?.invoiceId !== inv._id && (
+                          <button onClick={() => setPayForm({ invoiceId: inv._id, amountKes: String((inv.totalMinor - inv.amountPaidMinor) / 100), method: 'MPESA', reference: '' })} className="px-2.5 py-1 bg-navy-800 text-white rounded-lg text-[11px] font-semibold">Record payment</button>
+                        )}
+                        {payForm && payForm.invoiceId === inv._id && (
+                          <div className="flex items-center justify-end gap-1.5">
+                            <input type="number" value={payForm.amountKes} onChange={(e) => setPayForm(payForm ? { ...payForm, amountKes: e.target.value } : payForm)} className="w-20 border rounded-lg px-2 py-1 text-[11px]" placeholder="KES" />
+                            <select value={payForm.method} onChange={(e) => setPayForm(payForm ? { ...payForm, method: e.target.value } : payForm)} className="border rounded-lg px-1 py-1 text-[11px] bg-white">
+                              <option value="MPESA">M-Pesa</option><option value="BANK">Bank</option><option value="CARD">Card</option><option value="MANUAL">Manual</option>
+                            </select>
+                            <button onClick={handleRecordPayment} className="px-2 py-1 bg-brand-600 text-white rounded-lg text-[11px] font-semibold">Save</button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {invoices.length === 0 && <tr><td colSpan={7} className="py-8 text-center text-slate-400">No invoices yet — generate one per organization.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : activeTab === 'PAYOUTS' ? (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-navy-800">Settlement Payout Requests</h3>

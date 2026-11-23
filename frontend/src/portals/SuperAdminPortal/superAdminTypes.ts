@@ -3,6 +3,8 @@ export type SuperAdminSection =
   | 'ORGANIZATIONS'
   | 'STORES'
   | 'USERS_ROLES'
+  | 'SUB_ADMINS'
+  | 'ACTIVITY'
   | 'SUPPORT_DESK'
   | 'FINANCE'
   | 'RISK_FRAUD'

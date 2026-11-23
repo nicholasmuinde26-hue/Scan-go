@@ -25,6 +25,15 @@ export interface ISubscription extends Document {
   pastDueAt?: Date;
   gracePeriodEnd?: Date;
   paymentMethod?: 'MPESA' | 'CARD' | 'MANUAL';
+  // Per-organization negotiated pricing (custom agreement). Overrides plan pricing
+  // for invoice generation; the plan itself is never modified.
+  customPricing?: {
+    monthlyAmountMinor?: number;
+    annualAmountMinor?: number;
+    notes?: string;
+    setBy?: Schema.Types.ObjectId;
+    setAt?: Date;
+  };
   lastPaymentAt?: Date;
   nextPaymentAt?: Date;
   cancelAtPeriodEnd: boolean;
@@ -52,6 +61,13 @@ const subscriptionSchema = new Schema<ISubscription>(
     pastDueAt: Date,
     gracePeriodEnd: Date,
     paymentMethod: { type: String, enum: ['MPESA', 'CARD', 'MANUAL'] },
+    customPricing: {
+      monthlyAmountMinor: Number,
+      annualAmountMinor: Number,
+      notes: String,
+      setBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      setAt: Date,
+    },
     lastPaymentAt: Date,
     nextPaymentAt: Date,
     cancelAtPeriodEnd: { type: Boolean, default: false },

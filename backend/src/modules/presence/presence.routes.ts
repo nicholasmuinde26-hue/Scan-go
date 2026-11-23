@@ -176,7 +176,7 @@ async function configView(storeId: string) {
 
 router.get('/stores/:storeId/config', authenticate, requirePermission('fraud:config'), requireStoreAccess('params', 'storeId'), async (req: AuthRequest, res) => {
   try {
-    res.json({ success: true, config: await configView(req.params.storeId) });
+    res.json({ success: true, config: await configView(String(req.params.storeId)) });
   } catch (error) {
     sendError(res, error);
   }
@@ -185,7 +185,7 @@ router.get('/stores/:storeId/config', authenticate, requirePermission('fraud:con
 router.put('/stores/:storeId/config', authenticate, requirePermission('fraud:config'), requireStoreAccess('params', 'storeId'), async (req: AuthRequest, res) => {
   try {
     const body = configSchema.parse(req.body);
-    const before = await configView(req.params.storeId);
+    const before = await configView(String(req.params.storeId));
     const set: Record<string, any> = {};
     const unset: Record<string, 1> = {};
 
@@ -211,7 +211,7 @@ router.put('/stores/:storeId/config', authenticate, requirePermission('fraud:con
     if (Object.keys(unset).length) update.$unset = unset;
     if (Object.keys(update).length) await Store.updateOne({ _id: req.params.storeId }, update);
 
-    const after = await configView(req.params.storeId);
+    const after = await configView(String(req.params.storeId));
     await AuditLog.create({
       actorId: req.user!.id,
       actorRole: req.user!.role,
@@ -247,7 +247,7 @@ async function posterView(entryPoint: any, secret: string) {
 
 router.get('/stores/:storeId/entry-points', authenticate, requirePermission('fraud:config'), requireStoreAccess('params', 'storeId'), async (req: AuthRequest, res) => {
   try {
-    const secret = await ensureEntrySecret(req.params.storeId);
+    const secret = await ensureEntrySecret(String(req.params.storeId));
     const points = await EntryPoint.find({ storeId: req.params.storeId }).sort({ createdAt: 1 });
     res.json({ success: true, entryPoints: await Promise.all(points.map((p) => posterView(p, secret))) });
   } catch (error) {
@@ -258,7 +258,7 @@ router.get('/stores/:storeId/entry-points', authenticate, requirePermission('fra
 router.post('/stores/:storeId/entry-points', authenticate, requirePermission('fraud:config'), requireStoreAccess('params', 'storeId'), async (req: AuthRequest, res) => {
   try {
     const body = z.object({ label: z.string().trim().min(1).max(80), tier: z.union([z.literal(1), z.literal(2)]) }).parse(req.body);
-    const secret = await ensureEntrySecret(req.params.storeId);
+    const secret = await ensureEntrySecret(String(req.params.storeId));
     const point = await EntryPoint.create({ storeId: req.params.storeId, label: body.label, tier: body.tier, createdBy: req.user!.id });
     await AuditLog.create({
       actorId: req.user!.id,
@@ -301,7 +301,7 @@ router.patch('/stores/:storeId/entry-points/:id', authenticate, requirePermissio
       storeId: req.params.storeId as any,
       details: { entryPointId: point._id, label: point.label, active: point.active },
     }).catch(() => {});
-    const secret = await ensureEntrySecret(req.params.storeId);
+    const secret = await ensureEntrySecret(String(req.params.storeId));
     res.json({ success: true, entryPoint: await posterView(point, secret) });
   } catch (error) {
     sendError(res, error);
@@ -311,7 +311,7 @@ router.patch('/stores/:storeId/entry-points/:id', authenticate, requirePermissio
 // Invalidate every printed poster for this store at once. New codes appear in the entry-points list for reprinting.
 router.post('/stores/:storeId/rotate-secret', authenticate, requirePermission('fraud:config'), requireStoreAccess('params', 'storeId'), async (req: AuthRequest, res) => {
   try {
-    await rotateEntrySecret(req.params.storeId);
+    await rotateEntrySecret(String(req.params.storeId));
     await AuditLog.create({
       actorId: req.user!.id,
       actorRole: req.user!.role,

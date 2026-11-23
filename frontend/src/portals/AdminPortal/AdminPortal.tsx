@@ -66,6 +66,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     role === 'SYSTEM_ADMIN' ||
     role === 'PLATFORM_OWNER' ||
     role === 'PLATFORM_ADMIN' ||
+    role === 'PLATFORM_SUBADMIN' ||
     role === 'FINANCE_ADMIN' ||
     role === 'FINANCE_APPROVER' ||
     role === 'SUPPORT_AGENT_TIER1' ||
@@ -78,8 +79,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     return <SuperAdminDashboard currentUser={currentUser || null} currentStore={currentStore} />;
   }
 
-  // 2. Org Owner & Org Admin Workspace (All stores, staff & invitations, catalogue & pricing policy, subscription & billing, org reports, settings)
-  if (role === 'ORG_OWNER' || role === 'ORG_ADMIN' || role === 'FINANCE_OFFICER' || role === 'MARKETING_MANAGER') {
+  // 2. Org Owner, Org Admin, General Manager & Region Manager Workspace
+  if (
+    role === 'ORG_OWNER' ||
+    role === 'ORG_ADMIN' ||
+    role === 'GENERAL_MANAGER' ||
+    role === 'REGION_MANAGER' ||
+    role === 'FINANCE_OFFICER' ||
+    role === 'MARKETING_MANAGER'
+  ) {
     return (
       <OrgAdminDashboard
         currentUser={currentUser}
@@ -102,7 +110,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   }
 
   // 4. Catalogue & Stock Controller Workspace (Product CRUD, bulk import, barcode management, stock levels, adjustments, low-stock, promotions, cycle counts)
-  if (role === 'STOCK_CONTROLLER' || role === 'CATALOGUE_INVENTORY_MANAGER') {
+  if (role === 'STOCK_CONTROLLER' || role === 'STOCK_MANAGER' || role === 'CATALOGUE_INVENTORY_MANAGER') {
     return (
       <InventoryControllerDashboard
         currentUser={currentUser}

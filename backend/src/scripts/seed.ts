@@ -10,6 +10,7 @@ import { signReceiptToken, generateBasketHash } from '../shared/utils/crypto.js'
 import Organization from '../modules/organizations/organization.model.js';
 import { createSubscriptionForOrganization, ensurePlanCatalogue } from '../modules/subscriptions/subscription.service.js';
 import EntryPoint from '../modules/presence/entry-point.model.js';
+import { Region, Department } from '../modules/organizations/structure.model.js';
 import { ensureEntrySecret, signPosterCode } from '../modules/presence/presence.service.js';
 import { ENV } from '../config/environment.js';
 
@@ -58,6 +59,11 @@ async function seed() {
     location: 'Moi Avenue, Nairobi CBD',
     organizationId: naivasOrganization._id,
     active: true,
+    presencePolicy: {
+      enforced: false, // Entrance check-in deactivated for demo store
+      sessionTtlMinutes: 180,
+      maxGpsAccuracyMetres: 100,
+    },
     pickupSlots: [
       { slotId: 'SLOT-01', startTime: '09:00', endTime: '11:00', capacity: 25, active: true },
       { slotId: 'SLOT-02', startTime: '11:00', endTime: '13:00', capacity: 25, active: true },
@@ -100,6 +106,15 @@ async function seed() {
       randomAuditPercentage: 5,
     },
   });
+
+  // Optional org-structure layer: one region + departments for the Naivas demo org.
+  const naivasRegion = await Region.create({ organizationId: naivasOrganization._id, name: 'Nairobi Region', code: 'NAIROBI' });
+  await Department.create([
+    { organizationId: naivasOrganization._id, name: 'Checkout', code: 'CHECKOUT' },
+    { organizationId: naivasOrganization._id, name: 'Inventory', code: 'INVENTORY' },
+    { organizationId: naivasOrganization._id, name: 'Loss Prevention', code: 'LP' },
+  ]);
+  await Store.updateOne({ _id: store1._id }, { $set: { regionId: naivasRegion._id } });
 
   console.log('[Seed] Created stores:', store1.name, store2.name);
 
@@ -146,7 +161,7 @@ async function seed() {
     phone: '0744222333',
     email: 'david.exit@supermarket.co.ke',
     passwordHash,
-    role: 'EXIT_STAFF',
+    role: 'EXIT_OFFICER',
     storeId: store1._id,
   });
 
@@ -159,19 +174,31 @@ async function seed() {
     storeId: store1._id,
   });
 
+  // General manager: oversees supermarket operations org-wide, no billing authority.
   const manager = await User.create({
-    name: 'James Mwangi (Store Manager)',
+    name: 'James Mwangi (General Manager)',
     phone: '0766444555',
     email: 'james.manager@supermarket.co.ke',
     passwordHash,
-    role: 'STORE_MANAGER',
-    storeId: store1._id,
+    role: 'GENERAL_MANAGER',
+    organizationId: naivasOrganization._id,
+  });
+
+  // Region manager: oversees a configured subset of branches (here the Nairobi region).
+  const regionManager = await User.create({
+    name: 'Lucy Wanjiru (Nairobi Region Manager)',
+    phone: '0766555666',
+    email: 'lucy.region@supermarket.co.ke',
+    passwordHash,
+    role: 'REGION_MANAGER',
+    organizationId: naivasOrganization._id,
+    managedStoreIds: [store1._id],
   });
 
   // Inventory roles for testing the stock controller flow: a stock controller proposes products and a
   // catalogue & inventory manager (organization level) approves them.
   const stockController = await User.create({
-    name: 'Peter Ouma (Stock Controller)',
+    name: 'Peter Ouma (Naivas Stock Manager)',
     phone: '0777555666',
     email: 'peter.stock@supermarket.co.ke',
     passwordHash,
@@ -190,30 +217,55 @@ async function seed() {
   });
 
   const catalogueManager = await User.create({
-    name: 'Faith Njeri (Catalogue & Inventory Manager)',
+    name: 'Faith Njeri (Naivas Catalogue & Inventory Manager)',
     phone: '0788666777',
     email: 'faith.catalogue@supermarket.co.ke',
     passwordHash,
     role: 'CATALOGUE_INVENTORY_MANAGER',
+    storeId: store1._id,
+    organizationId: naivasOrganization._id,
+  });
+
+  const stockManagerNaivas = await User.create({
+    name: 'Naivas Stock Manager',
+    phone: '0777111222',
+    email: 'stock.naivas@supermarket.co.ke',
+    passwordHash,
+    role: 'STOCK_CONTROLLER',
+    storeId: store1._id,
+    organizationId: naivasOrganization._id,
+  });
+
+  const catalogueManagerNaivas = await User.create({
+    name: 'Naivas Catalogue Manager',
+    phone: '0788111222',
+    email: 'catalogue.naivas@supermarket.co.ke',
+    passwordHash,
+    role: 'CATALOGUE_INVENTORY_MANAGER',
+    storeId: store1._id,
     organizationId: naivasOrganization._id,
   });
 
   const systemAdmin = await User.create({
-    name: 'Alex Kibet (System Admin)',
+    name: 'Alex Kibet (Platform Owner)',
     phone: '0700000000',
     email: 'admin@scanandgo.co.ke',
     passwordHash,
-    role: 'SYSTEM_ADMIN',
-    storeId: store1._id,
+    role: 'PLATFORM_OWNER',
   });
 
   await User.updateMany(
-    { storeId: store1._id, role: { $ne: 'SYSTEM_ADMIN' } },
+    { storeId: store1._id, role: { $nin: ['SYSTEM_ADMIN', 'PLATFORM_OWNER', 'PLATFORM_ADMIN'] } },
     { $set: { organizationId: naivasOrganization._id } }
   );
 
   console.log('[Seed] Created users for all roles.');
+  console.log(`[Seed] Naivas Stock Manager login: ${stockManagerNaivas.phone} (${stockManagerNaivas.email}) / password123`);
+  console.log(`[Seed] Naivas Stock Controller login: ${stockController.phone} (${stockController.email}) / password123`);
+  console.log(`[Seed] Naivas Catalogue Manager login: ${catalogueManagerNaivas.phone} (${catalogueManagerNaivas.email}) / password123`);
+  console.log(`[Seed] Naivas Catalogue & Inventory Manager login: ${catalogueManager.phone} (${catalogueManager.email}) / password123`);
   console.log(`[Seed] Branch manager login: ${branchManager.phone} / password123 (${store1.name})`);
+  console.log(`[Seed] Region manager login: ${regionManager.phone} / password123 (${store1.name})`);
 
   // 3. Create Products with realistic Barcodes and Kenyan Supermarket Prices
   const productData = [

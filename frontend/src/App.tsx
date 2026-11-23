@@ -155,7 +155,7 @@ export function App() {
   // Branch staff only ever see their own branch; org staff only their organization's branches.
   // Shoppers and platform staff keep the free choice. (The server enforces this too.)
   const applyStoreScope = (user: User, storeList: Store[], preferred: Store | null): Store | null => {
-    const isBranchStaff = ['BRANCH_MANAGER', 'STORE_MANAGER', 'STOCK_CONTROLLER', 'SUPERVISOR', 'PICKER',
+    const isBranchStaff = ['BRANCH_MANAGER', 'STORE_MANAGER', 'STOCK_CONTROLLER', 'STOCK_MANAGER', 'SUPERVISOR', 'PICKER',
       'PACKER_VERIFIER', 'EXIT_OFFICER', 'EXIT_STAFF', 'CASHIER_CUSTOMER_SERVICE', 'DELIVERY_COLLECTION_HANDOVER'].includes(user.role);
     const isOrgStaff = ['ORG_OWNER', 'ORG_ADMIN', 'FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER',
       'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR'].includes(user.role);

@@ -21,7 +21,6 @@ import {
 } from 'lucide-react';
 import { Store, Product, User } from '../../types.js';
 import { apiRequest, formatKes } from '../../api.js';
-import { can } from '../../permissions.js';
 import { useLiveOrderEvents } from '../../hooks/useLiveOrderEvents.js';
 
 interface SupervisorPortalProps {
@@ -46,9 +45,6 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [liveAlert, setLiveAlert] = useState<string | null>(null);
-  const canResolve = can(currentUser, 'discrepancy:resolve');
-  const canReadAudit = can(currentUser, 'audit:read');
-  const canReadStaff = can(currentUser, 'staff:read');
 
   // Real-Time Live Order & Escalation Stream
   useLiveOrderEvents((event) => {
@@ -69,7 +65,6 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
 
   // Load escalations
   const loadEscalations = async () => {
-    if (!canResolve) return;
     try {
       setLoading(true);
       const res = await apiRequest(`/exit/escalations?storeId=${currentStore._id}`);
@@ -88,7 +83,6 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
 
   // Load audit logs
   const loadAuditLogs = async () => {
-    if (!canReadAudit) return;
     try {
       const res = await apiRequest(`/audits?storeId=${currentStore._id}`);
       if (res?.logs) {
@@ -100,9 +94,9 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
   };
 
   useEffect(() => {
-    if (canResolve) loadEscalations();
-    if (canReadAudit) loadAuditLogs();
-  }, [currentStore._id, canResolve, canReadAudit]);
+    loadEscalations();
+    loadAuditLogs();
+  }, [currentStore._id]);
 
   // Handle Discrepancy Resolution
   const handleResolveDiscrepancy = async (e: React.FormEvent) => {
@@ -209,7 +203,6 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
 
       {/* Navigation Sub-Tabs */}
       <div className="flex items-center space-x-2 border-b border-slate-200 pb-3">
-        {canResolve && <>
         <button
           onClick={() => setActiveTab('ESCALATIONS')}
           className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
@@ -233,9 +226,8 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
           <KeyRound className="w-4 h-4" />
           <span>Discrepancy Resolution Desk</span>
         </button>
-        </>}
 
-        {canReadAudit && <button
+        <button
           onClick={() => setActiveTab('AUDIT_LOG')}
           className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
             activeTab === 'AUDIT_LOG'
@@ -245,9 +237,9 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
         >
           <FileText className="w-4 h-4" />
           <span>Supervisor Audit Trail</span>
-        </button>}
+        </button>
 
-        {canReadStaff && <button
+        <button
           onClick={() => setActiveTab('STAFF')}
           className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
             activeTab === 'STAFF'
@@ -257,11 +249,11 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
         >
           <Users className="w-4 h-4" />
           <span>Staff on Duty</span>
-        </button>}
+        </button>
       </div>
 
       {/* TAB 1: ESCALATIONS INBOX */}
-      {activeTab === 'ESCALATIONS' && canResolve && (
+      {activeTab === 'ESCALATIONS' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left Column: Escalations List (5 cols) */}
           <div className="lg:col-span-5 space-y-3">
@@ -343,19 +335,6 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
               </div>
             </div>
 
-            {activeEscalationItem.orderId?.items?.some((item: any) => item.labelBarcode || item.tagSerial) && (
-              <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs">
-                <strong className="block text-navy-800">Produce weights and serialized tags</strong>
-                {activeEscalationItem.orderId.items.filter((item: any) => item.labelBarcode || item.tagSerial).map((item: any, index: number) => (
-                  <div key={`${item.labelBarcode || item.tagSerial}-${index}`} className="flex flex-wrap justify-between gap-2 border-t border-amber-100 pt-2">
-                    <span>{item.productName}</span>
-                    {item.labelBarcode && <span className="font-mono">{item.weightGrams}g · label {item.labelBarcode} · {item.scaleId}</span>}
-                    {item.tagSerial && <span className="font-mono">tag {item.tagSerial}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
-
             {/* Discrepant Items List */}
             <div className="space-y-2">
               <span className="text-xs font-bold text-slate-700 block">Discrepant Items Detected:</span>
@@ -383,7 +362,7 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
       )}
 
       {/* TAB 2: RESOLUTION DESK (Mandatory Reason Codes & PIN Overrides) */}
-      {activeTab === 'RESOLVE' && canResolve && (
+      {activeTab === 'RESOLVE' && (
         <div className="max-w-2xl mx-auto bg-white rounded-3xl border border-slate-200 p-7 shadow-xs space-y-6">
           <div className="border-b border-slate-100 pb-4">
             <span className="text-[10px] uppercase font-bold text-navy-600 bg-navy-50 border border-navy-200 px-2.5 py-0.5 rounded-full">
@@ -516,7 +495,7 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
       )}
 
       {/* TAB 3: AUDIT TRAIL */}
-      {activeTab === 'AUDIT_LOG' && canReadAudit && (
+      {activeTab === 'AUDIT_LOG' && (
         <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-xs space-y-4">
           <div className="flex justify-between items-center border-b border-slate-100 pb-3">
             <div>
@@ -563,7 +542,7 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
       )}
 
       {/* TAB 4: STAFF ON DUTY */}
-      {activeTab === 'STAFF' && canReadStaff && (
+      {activeTab === 'STAFF' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-xs space-y-3">
             <h3 className="font-bold text-sm text-navy-700 flex items-center space-x-2">

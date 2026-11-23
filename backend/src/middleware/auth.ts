@@ -163,6 +163,13 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     // NO wallet or payout access
   ],
 
+  PLATFORM_SUBADMIN: [
+    // Permission-built account: starts with read-only overview; real powers come
+    // from granted overrides chosen by the platform owner (bounded by the catalog).
+    'platform:overview:read',
+    'platform:orgs:read',
+  ],
+
   FINANCE_ADMIN: [
     // Money in and out, but can't approve own payouts
     'finance:ledger:read',
@@ -325,6 +332,38 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'audit:read',
   ],
 
+  GENERAL_MANAGER: [
+    // Oversees supermarket operations across all branches; no billing authority.
+    'org:read',
+    'stores:read',
+    'stores:manage',
+    'staff:read',
+    'staff:manage',
+    'staff:assign',
+    'orders:read:org',
+    'orders:read:store',
+    'picking:read',
+    'picking:assign',
+    'orders:refund',
+    'discrepancy:resolve',
+    'supervisor:override',
+    'supervisor:approve',
+    'fraud:view',
+    'fraud:config',
+    'inventory:read',
+    'inventory:write',
+    'inventory:adjust',
+    'inventory:approve',
+    'pricing:read',
+    'pricing:write',
+    'offers:read',
+    'offers:manage',
+    'reports:read',
+    'reports:export',
+    'audit:read',
+    // NO wallet, payouts, org:config, org:users:manage, subscription management
+  ],
+
   FINANCE_OFFICER: [
     // Org wallet and settlements, no catalogue access
     'org:read',
@@ -405,7 +444,28 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     // NO write permissions
   ],
 
-  // ==================== BRANCH ROLES ====================
+  // ==================== REGION / BRANCH MANAGEMENT ====================
+
+  REGION_MANAGER: [
+    // Oversees a configured subset of branches (managedStoreIds). Read-heavy
+    // oversight plus staff assignment inside those branches only.
+    'stores:read',
+    'staff:read',
+    'staff:assign',
+    'orders:read:store',
+    'picking:read',
+    'picking:assign',
+    'discrepancy:resolve',
+    'supervisor:override',
+    'fraud:view',
+    'inventory:read',
+    'inventory:write',
+    'pricing:read',
+    'reports:read',
+    'reports:export',
+    'audit:read',
+    // NO staff:manage/terminate, stores:manage/create, org or financial access
+  ],
 
   BRANCH_MANAGER: [
     // Own branch (can manage several)
@@ -431,14 +491,20 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   ],
 
   STOCK_CONTROLLER: [
-    // Inventory management
+    // Inventory and receiving management
     'stores:read',
     'inventory:read',
     'inventory:write',
     'inventory:adjust',
+    'inventory:approve',
+    'pricing:read',
+    'pricing:write',
+    'pricing:approve',
     'orders:read:store',
     // NO staff management or financial access
   ],
+
+  STOCK_MANAGER: [],
 
   SUPERVISOR: [
     // Supervisor desk only: resolve discrepancies and approve justified overrides.
@@ -532,6 +598,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
 };
 
 // Legacy role names must never drift from their current equivalents.
+ROLE_PERMISSIONS.STOCK_MANAGER = [...ROLE_PERMISSIONS.STOCK_CONTROLLER];
 ROLE_PERMISSIONS.STORE_MANAGER = [...ROLE_PERMISSIONS.BRANCH_MANAGER];
 ROLE_PERMISSIONS.EXIT_STAFF = [...ROLE_PERMISSIONS.EXIT_OFFICER];
 ROLE_PERMISSIONS.SYSTEM_ADMIN = [...ROLE_PERMISSIONS.PLATFORM_OWNER];
@@ -559,11 +626,17 @@ export function getRolePortalConfig(role: UserRole): PortalConfig {
   if (isOrgRole(role)) return only('ADMIN');
 
   switch (role) {
+    case 'GENERAL_MANAGER':
+      return only('ADMIN');
+    case 'REGION_MANAGER':
+      // Region manager runs a grouped-branch dashboard inside the org workspace.
+      return only('ADMIN');
     case 'BRANCH_MANAGER':
     case 'STORE_MANAGER':
       // Manager runs the branch dashboard and the supervisor desk (overrides, escalations).
       return { allowedPortals: ['ADMIN', 'SUPERVISOR'], defaultPortal: 'ADMIN', permissions };
     case 'STOCK_CONTROLLER':
+    case 'STOCK_MANAGER':
       return only('ADMIN');
     case 'SUPERVISOR':
       return only('SUPERVISOR');
@@ -589,6 +662,10 @@ export interface AuthRequest extends Request {
     role: UserRole;
     storeId?: string;
     organizationId?: string;
+    managedStoreIds?: string[];
+    managedOrganizationIds?: string[];
+    // Secondary branch/department assignments (embedded on the user document).
+    assignments?: { storeId?: string; role?: string; status?: string }[];
     name: string;
     phone: string;
     permissions: Permission[];
@@ -688,7 +765,7 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
     let effectiveStoreId = user.storeId ? user.storeId.toString() : undefined;
     let effectiveOrganizationId = user.organizationId ? user.organizationId.toString() : undefined;
 
-    const platformRoles = ['PLATFORM_OWNER', 'PLATFORM_ADMIN', 'FINANCE_ADMIN', 'FINANCE_APPROVER',
+    const platformRoles = ['PLATFORM_OWNER', 'PLATFORM_ADMIN', 'PLATFORM_SUBADMIN', 'FINANCE_ADMIN', 'FINANCE_APPROVER',
                            'SUPPORT_AGENT_TIER1', 'SUPPORT_LEAD_TIER2', 'RISK_FRAUD_ANALYST',
                            'COMPLIANCE_AUDITOR', 'PLATFORM_ENGINEER', 'CUSTOMER_SUCCESS', 'SYSTEM_ADMIN'];
 
@@ -707,6 +784,13 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
       role: user.role,
       storeId: effectiveStoreId,
       organizationId: effectiveOrganizationId,
+      managedStoreIds: (user.managedStoreIds || []).map((id: any) => id.toString()),
+      managedOrganizationIds: (user.managedOrganizationIds || []).map((id: any) => id.toString()),
+      assignments: (user.assignments || []).map((a: any) => ({
+        storeId: a.storeId ? a.storeId.toString() : undefined,
+        role: a.role,
+        status: a.status,
+      })),
       name: user.name,
       phone: user.phone,
       permissions: [...new Set(permissions)], // Deduplicate
@@ -797,7 +881,15 @@ export async function scopeToStore(req: AuthRequest, res: Response, next: NextFu
     }
 
     // Platform roles: multi-branch visibility (what they may DO is decided by permissions).
-    if (isPlatformRole(req.user.role)) return next();
+    // Sub-admins restricted to specific organizations are still bounded by managedOrganizationIds.
+    if (isPlatformRole(req.user.role)) {
+      const requested = (req.query.storeId || (req.body && req.body.storeId)) as string | undefined;
+      if (requested && !(await canAccessStore(req.user, String(requested)))) {
+        res.status(403).json({ success: false, error: 'That branch is outside your assigned organizations.' });
+        return;
+      }
+      return next();
+    }
 
     // Organization roles: any branch of THEIR organization only. A storeId from the query/body
     // must be verified, otherwise an org admin could read another supermarket's branch.
@@ -814,23 +906,48 @@ export async function scopeToStore(req: AuthRequest, res: Response, next: NextFu
     // require staff permissions, which customers never hold).
     if (req.user.role === 'CUSTOMER') return next();
 
-    // Branch staff are locked to their assigned branch.
+    // Region managers may touch only their configured branches. A storeId in the
+    // request must be one of them; with no storeId they get the aggregated region view.
+    if (isRegionRole(req.user.role)) {
+      const managed = req.user.managedStoreIds || [];
+      if (managed.length === 0) {
+        res.status(403).json({ success: false, error: 'Region manager is not assigned to any branches.' });
+        return;
+      }
+      const requested = (req.query.storeId || (req.body && req.body.storeId)) as string | undefined;
+      if (requested && !managed.includes(String(requested))) {
+        res.status(403).json({ success: false, error: 'That branch is outside your region.' });
+        return;
+      }
+      return next();
+    }
+
+    // Branch staff are locked to their assigned branch(es). A manager with
+    // managedStoreIds oversees several branches; everyone else is pinned to storeId.
     if (isBranchRole(req.user.role)) {
-      const staffStoreId = req.user.storeId;
-      if (!staffStoreId) {
+      // Home branch + managed branches + active secondary assignments.
+      const allowedSet = new Set<string>();
+      if (req.user.storeId) allowedSet.add(String(req.user.storeId));
+      (req.user.managedStoreIds || []).forEach((id) => allowedSet.add(String(id)));
+      (req.user.assignments || []).forEach((a) => {
+        if (a.storeId && a.status !== 'SUSPENDED') allowedSet.add(a.storeId);
+      });
+      const allowed = [...allowedSet];
+      if (allowed.length === 0) {
         res.status(403).json({ success: false, error: 'Staff user is not assigned to any retail store branch.' });
         return;
       }
-      if (req.query.storeId && String(req.query.storeId) !== staffStoreId) {
+      const requested = (req.query.storeId || (req.body && req.body.storeId)) as string | undefined;
+      if (requested && !allowed.includes(String(requested))) {
         res.status(403).json({ success: false, error: 'Cross-branch access forbidden.' });
         return;
       }
-      if (req.body && typeof req.body === 'object' && req.body.storeId && String(req.body.storeId) !== staffStoreId) {
-        res.status(403).json({ success: false, error: 'Cross-branch access forbidden.' });
-        return;
+      // Single-branch staff keep the old behaviour: the store is forced into the request.
+      // Multi-branch users must pass storeId explicitly per request.
+      if (allowed.length === 1) {
+        req.query.storeId = allowed[0];
+        if (req.body && typeof req.body === 'object') req.body.storeId = allowed[0];
       }
-      req.query.storeId = staffStoreId;
-      if (req.body && typeof req.body === 'object') req.body.storeId = staffStoreId;
       return next();
     }
 
@@ -843,28 +960,33 @@ export async function scopeToStore(req: AuthRequest, res: Response, next: NextFu
 
 // Helper functions for role categorization
 export function isPlatformRole(role: UserRole): boolean {
-  const platformRoles = ['PLATFORM_OWNER', 'PLATFORM_ADMIN', 'FINANCE_ADMIN', 'FINANCE_APPROVER',
+  const platformRoles = ['PLATFORM_OWNER', 'PLATFORM_ADMIN', 'PLATFORM_SUBADMIN', 'FINANCE_ADMIN', 'FINANCE_APPROVER',
                          'SUPPORT_AGENT_TIER1', 'SUPPORT_LEAD_TIER2', 'RISK_FRAUD_ANALYST',
                          'COMPLIANCE_AUDITOR', 'PLATFORM_ENGINEER', 'CUSTOMER_SUCCESS', 'SYSTEM_ADMIN'];
   return platformRoles.includes(role);
 }
 
 export function isOrgRole(role: UserRole): boolean {
-  const orgRoles = ['ORG_OWNER', 'ORG_ADMIN', 'FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER',
+  const orgRoles = ['ORG_OWNER', 'ORG_ADMIN', 'GENERAL_MANAGER', 'FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER',
                     'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR'];
   return orgRoles.includes(role);
 }
 
+// Region managers oversee a configured subset of branches (managedStoreIds), not the whole org.
+export function isRegionRole(role: UserRole): boolean {
+  return role === 'REGION_MANAGER';
+}
+
 export function isBranchRole(role: UserRole): boolean {
-  const branchRoles = ['BRANCH_MANAGER', 'STOCK_CONTROLLER', 'SUPERVISOR', 'CASHIER_CUSTOMER_SERVICE',
+  const branchRoles = ['BRANCH_MANAGER', 'STOCK_CONTROLLER', 'STOCK_MANAGER', 'SUPERVISOR', 'CASHIER_CUSTOMER_SERVICE',
                        'PICKER', 'PACKER_VERIFIER', 'EXIT_OFFICER', 'DELIVERY_COLLECTION_HANDOVER',
                        'EXIT_STAFF', 'STORE_MANAGER'];
   return branchRoles.includes(role);
 }
 
 export function requiresMFA(role: UserRole): boolean {
-  // MFA required for all platform roles and org owners/admins
-  return isPlatformRole(role) || role === 'ORG_OWNER' || role === 'ORG_ADMIN';
+  // MFA required for all platform roles and org owners/admins/general managers
+  return isPlatformRole(role) || role === 'ORG_OWNER' || role === 'ORG_ADMIN' || role === 'GENERAL_MANAGER' || role === 'REGION_MANAGER';
 }
 
 export function isLegacyRole(role: UserRole): boolean {
@@ -898,11 +1020,12 @@ export function canonicalRole(role: UserRole): UserRole {
   return ROLE_ALIASES[role] || role;
 }
 
-export type RoleScope = 'PLATFORM' | 'ORG' | 'BRANCH' | 'CUSTOMER' | 'UNKNOWN';
+export type RoleScope = 'PLATFORM' | 'ORG' | 'REGION' | 'BRANCH' | 'CUSTOMER' | 'UNKNOWN';
 
 export function roleScope(role: UserRole): RoleScope {
   if (isPlatformRole(role)) return 'PLATFORM';
   if (isOrgRole(role)) return 'ORG';
+  if (isRegionRole(role)) return 'REGION';
   if (isBranchRole(role)) return 'BRANCH';
   if (role === 'CUSTOMER') return 'CUSTOMER';
   return 'UNKNOWN';
@@ -936,6 +1059,10 @@ const FORBIDDEN_GRANT_PREFIXES: Record<RoleScope, string[]> = {
   PLATFORM: ['picking:', 'exit:', 'discrepancy:', 'supervisor:', 'baskets:', 'orders:handover', 'orders:create', 'orders:read:own'],
   ORG: ['platform:', 'system:', 'cs:', 'support:actas', 'data:reveal', 'picking:', 'exit:', 'discrepancy:', 'supervisor:',
         'baskets:', 'orders:handover', 'orders:create', 'orders:read:own'],
+  REGION: ['platform:', 'system:', 'org:', 'wallet:', 'payouts:', 'finance:', 'compliance:', 'cs:',
+           'support:actas', 'support:view:any', 'data:reveal', 'reports:export:sensitive', 'audit:export',
+           'staff:manage', 'staff:terminate', 'stores:manage', 'stores:create', 'stores:suspend',
+           'orders:read:any', 'orders:read:org', 'orders:refund', 'inventory:approve', 'pricing:write', 'pricing:approve'],
   BRANCH: ['platform:', 'system:', 'org:', 'wallet:', 'payouts:', 'finance:', 'compliance:', 'cs:',
            'support:actas', 'support:view:any', 'data:reveal', 'reports:export:sensitive', 'audit:export', 'orders:read:any', 'orders:read:org'],
   CUSTOMER: [''], // '' prefix matches everything: customers can never be elevated by overrides
@@ -946,6 +1073,40 @@ export function filterGrantablePermissions(role: UserRole, granted: Permission[]
   const forbidden = FORBIDDEN_GRANT_PREFIXES[roleScope(role)] || [''];
   return granted.filter((p) => !forbidden.some((prefix) => p.startsWith(prefix)));
 }
+
+/**
+ * The permission catalog a PLATFORM_SUBADMIN may be granted, grouped for the
+ * permission-builder UI. Deliberately excludes powers that let a sub-admin
+ * appoint more admins or rewrite platform settings — those stay with the owner.
+ */
+export const SUBADMIN_PERMISSION_CATALOG: { group: string; permissions: Permission[] }[] = [
+  {
+    group: 'Supermarket workspaces',
+    permissions: ['platform:orgs:read', 'platform:orgs:create', 'platform:orgs:suspend', 'org:read', 'org:config', 'org:users:manage', 'org:subscription:view', 'org:subscription:manage'],
+  },
+  {
+    group: 'Billing & finance',
+    permissions: ['finance:ledger:read', 'finance:invoices:read', 'finance:invoices:create', 'finance:reconcile', 'finance:export', 'reports:read', 'reports:export', 'reports:export:sensitive'],
+  },
+  {
+    group: 'Support',
+    permissions: ['support:search', 'support:view:any', 'support:actas', 'support:reset_password', 'support:resend_receipt', 'support:retry_payment'],
+  },
+  {
+    group: 'Monitoring & risk',
+    permissions: ['fraud:view', 'fraud:config', 'fraud:block', 'fraud:unblock', 'fraud:review', 'audit:read', 'audit:export', 'compliance:read', 'system:health', 'system:feature_flags', 'cs:usage:view', 'cs:trials:manage'],
+  },
+  {
+    group: 'Data access',
+    permissions: ['data:reveal', 'data:mask'],
+  },
+];
+
+/** Permissions that can never be granted to a PLATFORM_SUBADMIN (owner-only powers). */
+export const SUBADMIN_FORBIDDEN: Permission[] = [
+  'platform:admins:create', 'platform:admins:approve', 'platform:settings:write',
+  'system:admin', 'system:maintenance',
+];
 
 /**
  * Can this user touch data that belongs to this store?
@@ -960,12 +1121,34 @@ export async function canAccessStore(
 ): Promise<boolean> {
   if (!storeId) return false;
   const scope = roleScope(user.role);
-  if (scope === 'PLATFORM') return true;
-  if (scope === 'BRANCH') return !!user.storeId && String(user.storeId) === String(storeId);
+
+  const storeModule = await import('../modules/stores/store.model.js');
+  const store = await (storeModule.default as any).findById(storeId).select('organizationId');
+  if (!store) return false;
+
+  if (scope === 'PLATFORM') {
+    // Platform sub-admins may be restricted to specific supermarket organizations.
+    const managedOrgs = user.managedOrganizationIds || [];
+    if (managedOrgs.length === 0) return true;
+    return !!store.organizationId && managedOrgs.includes(store.organizationId.toString());
+  }
+  if (scope === 'REGION') {
+    return (user.managedStoreIds || []).includes(String(storeId));
+  }
+  if (scope === 'BRANCH') {
+    // Branch staff reach: home storeId + managedStoreIds (multi-branch managers)
+    // + any ACTIVE secondary assignment store. Permissions still resolve from the
+    // primary role — assignments widen scope, never grant extra powers.
+    const allowed = new Set<string>();
+    if (user.storeId) allowed.add(String(user.storeId));
+    (user.managedStoreIds || []).forEach((id) => allowed.add(String(id)));
+    (user.assignments || []).forEach((a) => {
+      if (a.storeId && a.status !== 'SUSPENDED') allowed.add(a.storeId);
+    });
+    return allowed.has(String(storeId));
+  }
   if (scope === 'ORG') {
     if (!user.organizationId || !/^[a-f\d]{24}$/i.test(String(storeId))) return false;
-    const storeModule = await import('../modules/stores/store.model.js');
-    const store = await (storeModule.default as any).findById(storeId).select('organizationId');
     return !!store?.organizationId && store.organizationId.toString() === String(user.organizationId);
   }
   return false;
@@ -978,8 +1161,11 @@ export function canAccessOrganization(
 ): boolean {
   if (!organizationId) return false;
   const scope = roleScope(user.role);
-  if (scope === 'PLATFORM') return true;
-  if (scope === 'ORG' || scope === 'BRANCH') {
+  if (scope === 'PLATFORM') {
+    const managedOrgs = user.managedOrganizationIds || [];
+    return managedOrgs.length === 0 || managedOrgs.includes(String(organizationId));
+  }
+  if (scope === 'ORG' || scope === 'REGION' || scope === 'BRANCH') {
     return !!user.organizationId && String(user.organizationId) === String(organizationId);
   }
   return false;

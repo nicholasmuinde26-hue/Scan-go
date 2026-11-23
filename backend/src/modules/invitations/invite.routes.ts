@@ -25,6 +25,9 @@ const ORG_STAFF_ROLES = [
   'ORG_ADMIN', 'FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER',
   'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR',
 ];
+// Senior org appointments: GENERAL_MANAGER runs operations org-wide; REGION_MANAGER
+// oversees a configured subset of branches. Only the owner/admin appoints them.
+const SENIOR_ORG_ROLES = ['GENERAL_MANAGER', 'REGION_MANAGER'];
 
 const INVITABLE_BY: Record<string, string[]> = {
   // Platform organization admins/owners are appointed in the platform console,
@@ -34,8 +37,10 @@ const INVITABLE_BY: Record<string, string[]> = {
   PLATFORM_ADMIN: [],
   // Org Owners and Org Admins are appointed by platform staff through the
   // platform organization workflow, never through tenant staff invitations.
-  ORG_OWNER: [...ORG_STAFF_ROLES.filter((r) => r !== 'ORG_ADMIN'), ...BRANCH_STAFF_ROLES],
-  ORG_ADMIN: [...ORG_STAFF_ROLES.filter((r) => r !== 'ORG_ADMIN'), ...BRANCH_STAFF_ROLES],
+  ORG_OWNER: [...ORG_STAFF_ROLES.filter((r) => r !== 'ORG_ADMIN'), ...SENIOR_ORG_ROLES, ...BRANCH_STAFF_ROLES],
+  ORG_ADMIN: [...ORG_STAFF_ROLES.filter((r) => r !== 'ORG_ADMIN'), 'REGION_MANAGER', ...BRANCH_STAFF_ROLES],
+  // A region manager staffs the branches they oversee, but cannot appoint other managers.
+  REGION_MANAGER: BRANCH_STAFF_ROLES.filter((r) => r !== 'BRANCH_MANAGER'),
   BRANCH_MANAGER: BRANCH_STAFF_ROLES.filter((r) => r !== 'BRANCH_MANAGER'),
 };
 
@@ -50,7 +55,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     const name = String(req.body.name || '').trim();
     const phone = String(req.body.phone || '').trim();
     const email = req.body.email ? String(req.body.email).trim() : undefined;
-    const { role, organizationId, storeId } = req.body;
+    const { role, organizationId, storeId, managedStoreIds, managedOrganizationIds, departmentId, reportsTo, employeeId } = req.body;
 
     if (!name || !phone || !role) {
       res.status(400).json({ success: false, error: 'Name, phone, and role are required.' });
@@ -71,7 +76,13 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
 
     const isPlatformInviter = ['PLATFORM_OWNER', 'PLATFORM_ADMIN'].includes(inviterRole);
     const isOrgInviter = ['ORG_OWNER', 'ORG_ADMIN'].includes(inviterRole);
+    const isRegionInviter = inviterRole === 'REGION_MANAGER';
     const isBranchRoleInvite = BRANCH_STAFF_ROLES.includes(role);
+    const isRegionInvite = role === 'REGION_MANAGER';
+    const isBranchManagerInvite = role === 'BRANCH_MANAGER';
+
+    const requestedManagedStoreIds: string[] = Array.isArray(managedStoreIds) ? managedStoreIds.map(String).filter(Boolean) : [];
+    const requestedManagedOrgIds: string[] = Array.isArray(managedOrganizationIds) ? managedOrganizationIds.map(String).filter(Boolean) : [];
 
     // Ensure phone is not already registered
     const existingUser = await User.findOne({ phone: phone.trim() });
@@ -107,18 +118,66 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
         res.status(403).json({ success: false, error: 'That branch does not belong to your organization.' });
         return;
       }
-    } else {
-      // Branch manager: always their own branch.
+    } else if (isRegionInviter) {
+      // Region manager: pinned to their own organization and their managed branches.
       targetOrgId = req.user!.organizationId;
-      targetStoreId = req.user!.storeId;
+      const allowedStores = (req.user!.managedStoreIds || []).map(String);
+      targetStoreId = storeId ? String(storeId) : undefined;
+      if (targetStoreId && !allowedStores.includes(targetStoreId)) {
+        res.status(403).json({ success: false, error: 'That branch is outside your region.' });
+        return;
+      }
+      if (requestedManagedStoreIds.some((id) => !allowedStores.includes(id))) {
+        res.status(403).json({ success: false, error: 'You can only assign branches inside your region.' });
+        return;
+      }
+    } else {
+      // Branch manager: their own branch, or any branch in managedStoreIds when they oversee several.
+      targetOrgId = req.user!.organizationId;
+      const allowedStores = (req.user!.managedStoreIds && req.user!.managedStoreIds.length > 0)
+        ? req.user!.managedStoreIds.map(String)
+        : [String(req.user!.storeId)];
+      targetStoreId = storeId ? String(storeId) : req.user!.storeId ? String(req.user!.storeId) : undefined;
+      if (targetStoreId && !allowedStores.includes(targetStoreId)) {
+        res.status(403).json({ success: false, error: 'Cross-branch access forbidden.' });
+        return;
+      }
+      if (requestedManagedStoreIds.some((id) => !allowedStores.includes(id))) {
+        res.status(403).json({ success: false, error: 'You can only assign branches you manage.' });
+        return;
+      }
     }
 
-    // 3. Branch roles must be pinned to one branch; organization roles must not be.
-    if (isBranchRoleInvite && !targetStoreId) {
+    // 3. Scope rules per invited role.
+    //    - REGION_MANAGER must list the branches they will oversee (no single home store required).
+    //    - BRANCH_MANAGER needs a home storeId and may additionally list managedStoreIds.
+    //    - Other branch roles are pinned to exactly one branch.
+    //    - Organization roles must not carry branch assignments.
+    if (isRegionInvite) {
+      if (requestedManagedStoreIds.length === 0) {
+        res.status(400).json({ success: false, error: 'Select at least one branch this region manager will oversee.' });
+        return;
+      }
+      targetStoreId = undefined;
+    } else if (isBranchManagerInvite) {
+      if (!targetStoreId && requestedManagedStoreIds.length === 0) {
+        res.status(400).json({ success: false, error: 'Choose the branch this manager will work at.' });
+        return;
+      }
+    } else if (isBranchRoleInvite && !targetStoreId) {
       res.status(400).json({ success: false, error: 'Choose the branch this staff member will work at.' });
       return;
     }
-    if (!isBranchRoleInvite) targetStoreId = undefined;
+    if (!isBranchRoleInvite && !isRegionInvite) targetStoreId = undefined;
+
+    // Managed branches must belong to the target organization.
+    if (requestedManagedStoreIds.length > 0 && targetOrgId) {
+      const owned = await Store.find({ _id: { $in: requestedManagedStoreIds }, organizationId: targetOrgId }).select('_id');
+      if (owned.length !== new Set(requestedManagedStoreIds).size) {
+        res.status(400).json({ success: false, error: 'One or more selected branches do not belong to this supermarket.' });
+        return;
+      }
+    }
 
     // Customers do not consume a paid staff seat. Every other invited role is checked
     // against the organization subscription before the invitation is issued.
@@ -146,6 +205,11 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
       role,
       organizationId: targetOrgId,
       storeId: targetStoreId,
+      managedStoreIds: requestedManagedStoreIds.length ? requestedManagedStoreIds : undefined,
+      managedOrganizationIds: requestedManagedOrgIds.length ? requestedManagedOrgIds : undefined,
+      departmentId: departmentId || undefined,
+      reportsTo: reportsTo || undefined,
+      employeeId: employeeId ? String(employeeId).trim() : undefined,
       phone: phone.trim(),
       email: email ? email.trim() : undefined,
       name: name.trim(),
@@ -162,7 +226,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
       entityType: 'USER',
       entityId: invite._id.toString(),
       storeId: targetStoreId,
-      newValue: { phone: invite.phone, role: invite.role, organizationId: targetOrgId, storeId: targetStoreId },
+      newValue: { phone: invite.phone, role: invite.role, organizationId: targetOrgId, storeId: targetStoreId, managedStoreIds: requestedManagedStoreIds },
       reason: `Invite generated for ${name} (${role})`,
     });
 
@@ -256,7 +320,8 @@ router.post('/accept/:token', async (req: Request, res: Response) => {
     // Require MFA for administrative/privileged roles
     const privilegedRoles = [
       'SYSTEM_ADMIN', 'PLATFORM_OWNER', 'PLATFORM_ADMIN', 'FINANCE_ADMIN', 'FINANCE_APPROVER',
-      'ORG_OWNER', 'ORG_ADMIN', 'FINANCE_OFFICER', 'LOSS_PREVENTION_MANAGER', 'BRANCH_MANAGER', 'STORE_MANAGER'
+      'ORG_OWNER', 'ORG_ADMIN', 'GENERAL_MANAGER', 'FINANCE_OFFICER', 'LOSS_PREVENTION_MANAGER',
+      'REGION_MANAGER', 'BRANCH_MANAGER', 'STORE_MANAGER'
     ];
     const roleRequiresMfa = privilegedRoles.includes(invite.role);
 
@@ -269,11 +334,21 @@ router.post('/accept/:token', async (req: Request, res: Response) => {
       role: invite.role,
       organizationId: invite.organizationId,
       storeId: invite.storeId,
+      managedStoreIds: invite.managedStoreIds,
+      managedOrganizationIds: invite.managedOrganizationIds,
+      departmentId: invite.departmentId,
+      reportsTo: invite.reportsTo,
+      employeeId: invite.employeeId,
       status: 'ACTIVE',
       active: true,
       mustChangePassword: false,
       mfaEnabled: false, // will enroll next if required
     });
+
+    // A branch manager invited to a home branch becomes that branch's manager.
+    if (invite.storeId && invite.role === 'BRANCH_MANAGER') {
+      await Store.updateOne({ _id: invite.storeId }, { $set: { managerId: user._id } });
+    }
 
     // Mark invite accepted
     invite.status = 'ACCEPTED';

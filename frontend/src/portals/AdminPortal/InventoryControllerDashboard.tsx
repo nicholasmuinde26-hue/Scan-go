@@ -100,6 +100,10 @@ export const InventoryControllerDashboard: React.FC<InventoryControllerDashboard
 
   // Cycle Count State
   const [cycleCounts, setCycleCounts] = useState<{ [productId: string]: number }>({});
+
+  // Org catalogue library (items other branches registered; pull into this branch)
+  const [catalogueItems, setCatalogueItems] = useState<any[] | null>(null);
+  const [pulling, setPulling] = useState(false);
   const [submittingCycle, setSubmittingCycle] = useState(false);
 
   // Load products
@@ -120,6 +124,32 @@ export const InventoryControllerDashboard: React.FC<InventoryControllerDashboard
   useEffect(() => {
     loadProducts();
   }, [currentStore._id]);
+
+  const loadCatalogue = async () => {
+    try {
+      const res = await apiRequest(`/products/catalogue?storeId=${currentStore._id}`);
+      if (res?.success) setCatalogueItems(res.items || []);
+    } catch { setCatalogueItems([]); }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'CATALOGUE') loadCatalogue();
+  }, [activeTab, currentStore._id]);
+
+  const pullFromCatalogue = async (ids?: string[]) => {
+    try {
+      setPulling(true);
+      const res = await apiRequest('/products/from-catalogue', {
+        method: 'POST',
+        body: JSON.stringify({ storeId: currentStore._id, catalogueProductIds: ids }),
+      });
+      const sum = res?.summary || {};
+      setStatusMsg({ type: sum.failed ? 'error' : 'success', text: `Catalogue pull complete: ${sum.added || 0} added to this branch, ${sum.skipped || 0} already present, ${sum.failed || 0} failed.` });
+      loadCatalogue(); loadProducts();
+    } catch (err: any) {
+      setStatusMsg({ type: 'error', text: err.message || 'Catalogue pull failed' });
+    } finally { setPulling(false); }
+  };
 
   const filteredProducts = products.filter(
     (p) =>
@@ -410,6 +440,30 @@ export const InventoryControllerDashboard: React.FC<InventoryControllerDashboard
       {/* Tab 1: Catalogue CRUD */}
       {activeTab === 'CATALOGUE' && (
         <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-xs space-y-4">
+          {catalogueItems && catalogueItems.length > 0 && (
+            <div className="border border-amber-200 bg-amber-50/50 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-xs font-black text-navy-800 uppercase tracking-wider">Org catalogue library</h4>
+                  <p className="text-[11px] text-slate-500">Products registered by your other branches. Pulling one creates this branch's own price and stock — branches never share stock.</p>
+                </div>
+                <button onClick={() => pullFromCatalogue()} disabled={pulling} className="px-3 py-1.5 bg-amber-600 text-white rounded-xl text-[11px] font-bold disabled:opacity-50">
+                  {pulling ? 'Pulling…' : 'Pull all missing'}
+                </button>
+              </div>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto">
+                {catalogueItems.filter((i) => !i.inBranch).slice(0, 60).map((item) => (
+                  <div key={item._id} className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-bold text-navy-800 truncate">{item.name}</p>
+                      <p className="text-[10px] text-slate-400 font-mono">{item.barcode} · {formatKes(item.priceMinor)}</p>
+                    </div>
+                    <button onClick={() => pullFromCatalogue([item._id])} disabled={pulling} className="ml-2 shrink-0 px-2 py-1 bg-navy-800 text-white rounded-lg text-[10px] font-bold">Add</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="relative max-w-sm w-full">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />

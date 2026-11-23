@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Sparkles,
   Shield,
+  UserCheck,
   ChevronRight,
   Menu,
   X,
@@ -38,6 +39,8 @@ import { ComplianceAuditSection } from './ComplianceAuditSection.js';
 import { PlatformConfigSection } from './PlatformConfigSection.js';
 import { ApprovalsInboxSection } from './ApprovalsInboxSection.js';
 import { EngineeringSection } from './EngineeringSection.js';
+import { SubAdminsSection } from './SubAdminsSection.js';
+import { ActivitySection } from './ActivitySection.js';
 
 interface SuperAdminDashboardProps {
   currentUser: User | null;
@@ -121,6 +124,8 @@ export const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({
     { id: 'ORGANIZATIONS', label: 'Organizations', icon: Building2, badge: organizations.length, allowed: sees(['platform:orgs:read']) },
     { id: 'STORES', label: 'Stores / Branches', icon: StoreIcon, badge: stores.length, allowed: sees(['platform:orgs:read']) },
     { id: 'USERS_ROLES', label: 'Users & Roles', icon: Users, allowed: sees(['platform:admins:create']) },
+    { id: 'SUB_ADMINS', label: 'Sub-admins', icon: UserCheck, allowed: sees(['platform:admins:create', 'platform:orgs:read']) },
+    { id: 'ACTIVITY', label: 'Live Activity', icon: Activity, allowed: sees(['platform:overview:read']) },
     { id: 'SUPPORT_DESK', label: 'Support Desk', icon: Headphones, allowed: sees(['support:view:any']) },
     { id: 'FINANCE', label: 'Finance & Ledger', icon: DollarSign, allowed: sees(['finance:ledger:read','finance:export']) },
     { id: 'RISK_FRAUD', label: 'Risk & Fraud', icon: ShieldAlert, badge: kpis?.todayExitMismatches || undefined, allowed: sees(['fraud:view']) },
@@ -279,6 +284,12 @@ export const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({
           {sectionAllowed && activeSection === 'USERS_ROLES' && (
             <UsersRolesSection organizations={organizations} stores={stores} currentUser={currentUser} />
           )}
+
+          {sectionAllowed && activeSection === 'SUB_ADMINS' && (
+            <SubAdminsSection currentUser={currentUser} organizations={organizations} />
+          )}
+
+          {sectionAllowed && activeSection === 'ACTIVITY' && <ActivitySection />}
 
           {sectionAllowed && activeSection === 'SUPPORT_DESK' && <SupportDeskSection />}
 

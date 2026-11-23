@@ -2,14 +2,38 @@ import { Schema, model, Document } from 'mongoose';
 import { UserRole } from '../../shared/types/index.js';
 import { Permission } from '../../middleware/auth.js';
 
+export interface IStaffAssignment {
+  storeId?: Schema.Types.ObjectId;
+  departmentId?: Schema.Types.ObjectId;
+  role: UserRole;
+  employeeId?: string;
+  reportsTo?: Schema.Types.ObjectId;
+  status: 'ACTIVE' | 'SUSPENDED';
+  createdAt: Date;
+}
+
 export interface IUser extends Document {
   name: string;
   phone: string;
   email?: string;
+  googleId?: string;
+  avatarUrl?: string;
   passwordHash: string;
   role: UserRole;
   storeId?: Schema.Types.ObjectId;
   organizationId?: Schema.Types.ObjectId;
+  // Multi-branch / multi-org scoping. Empty arrays mean "unrestricted within scope rules"
+  // only for platform roles; for REGION_MANAGER/BRANCH_MANAGER an empty list falls back
+  // to storeId (branch) or denies store access (region must always list stores).
+  managedStoreIds?: Schema.Types.ObjectId[];
+  managedOrganizationIds?: Schema.Types.ObjectId[];
+  // Org-structure fields (optional): employee number, department, reporting line.
+  employeeId?: string;
+  jobTitle?: string;
+  departmentId?: Schema.Types.ObjectId;
+  reportsTo?: Schema.Types.ObjectId;
+  // Additional branch/department assignments beyond the home storeId+role.
+  assignments?: IStaffAssignment[];
   mustChangePassword?: boolean;
   tripsCompleted: number;
   totalSpentMinor: number;
@@ -46,7 +70,7 @@ export interface IUser extends Document {
   // Permission expiry (for temporary grants)
   permissionExpiry?: Date;
   // Account status
-  status: 'ACTIVE' | 'SUSPENDED' | 'DEACTIVATED';
+  status: 'ACTIVE' | 'SUSPENDED' | 'ON_LEAVE' | 'DEACTIVATED';
   // Last activity tracking
   lastLoginAt?: Date;
   lastPasswordChangeAt?: Date;
@@ -63,6 +87,7 @@ export interface IUser extends Document {
     lastActiveAt: Date;
     expiresAt: Date;
   }>;
+  deviceTokens?: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -72,6 +97,8 @@ const userSchema = new Schema<IUser>(
     name: { type: String, required: true },
     phone: { type: String, required: true, unique: true, index: true },
     email: { type: String, sparse: true },
+    googleId: { type: String, sparse: true, index: true },
+    avatarUrl: { type: String },
     passwordHash: { type: String, required: true },
     role: {
       type: String,
@@ -79,6 +106,7 @@ const userSchema = new Schema<IUser>(
         // Platform roles
         'PLATFORM_OWNER',
         'PLATFORM_ADMIN',
+        'PLATFORM_SUBADMIN',
         'FINANCE_ADMIN',
         'FINANCE_APPROVER',
         'SUPPORT_AGENT_TIER1',
@@ -90,12 +118,14 @@ const userSchema = new Schema<IUser>(
         // Organization roles
         'ORG_OWNER',
         'ORG_ADMIN',
+        'GENERAL_MANAGER',
         'FINANCE_OFFICER',
         'CATALOGUE_INVENTORY_MANAGER',
         'MARKETING_MANAGER',
         'LOSS_PREVENTION_MANAGER',
         'ORG_AUDITOR',
         // Branch roles
+        'REGION_MANAGER',
         'BRANCH_MANAGER',
         'STOCK_CONTROLLER',
         'SUPERVISOR',
@@ -115,6 +145,21 @@ const userSchema = new Schema<IUser>(
     },
     storeId: { type: Schema.Types.ObjectId, ref: 'Store' },
     organizationId: { type: Schema.Types.ObjectId, ref: 'Organization' },
+    managedStoreIds: [{ type: Schema.Types.ObjectId, ref: 'Store' }],
+    managedOrganizationIds: [{ type: Schema.Types.ObjectId, ref: 'Organization' }],
+    employeeId: { type: String, trim: true },
+    jobTitle: { type: String, trim: true },
+    departmentId: { type: Schema.Types.ObjectId, ref: 'Department' },
+    reportsTo: { type: Schema.Types.ObjectId, ref: 'User' },
+    assignments: [{
+      storeId: { type: Schema.Types.ObjectId, ref: 'Store' },
+      departmentId: { type: Schema.Types.ObjectId, ref: 'Department' },
+      role: { type: String },
+      employeeId: { type: String },
+      reportsTo: { type: Schema.Types.ObjectId, ref: 'User' },
+      status: { type: String, enum: ['ACTIVE', 'SUSPENDED'], default: 'ACTIVE' },
+      createdAt: { type: Date, default: Date.now },
+    }],
     mustChangePassword: { type: Boolean, default: false },
     tripsCompleted: { type: Number, default: 0 },
     totalSpentMinor: { type: Number, default: 0 },
@@ -149,7 +194,7 @@ const userSchema = new Schema<IUser>(
     // Permission expiry
     permissionExpiry: { type: Date },
     // Account status
-    status: { type: String, enum: ['ACTIVE', 'SUSPENDED', 'DEACTIVATED'], default: 'ACTIVE' },
+    status: { type: String, enum: ['ACTIVE', 'SUSPENDED', 'ON_LEAVE', 'DEACTIVATED'], default: 'ACTIVE' },
     active: { type: Boolean, default: true, index: true },
     failedLoginAttempts: { type: Number, default: 0 },
     lockoutUntil: { type: Date },
@@ -164,6 +209,7 @@ const userSchema = new Schema<IUser>(
         expiresAt: { type: Date, required: true },
       },
     ],
+    deviceTokens: { type: [String], default: [] },
     // Last activity tracking
     lastLoginAt: { type: Date },
     lastPasswordChangeAt: { type: Date },

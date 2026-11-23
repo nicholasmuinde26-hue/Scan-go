@@ -2,7 +2,7 @@ import { Router } from 'express';
 import User from './user.model.js';
 import Organization from '../organizations/organization.model.js';
 import Store from '../stores/store.model.js';
-import { authenticate, authorize, AuthRequest, Permission, roleScope, canonicalRole, filterGrantablePermissions } from '../../middleware/auth.js';
+import { authenticate, authorize, requirePermission, canAccessStore, canAccessOrganization, AuthRequest, Permission, roleScope, canonicalRole, filterGrantablePermissions } from '../../middleware/auth.js';
 import AuditLog from '../audits/audit.model.js';
 import { ROLE_PERMISSIONS } from '../../middleware/auth.js';
 import { applyDataMasking, requireRevealPermission } from '../../middleware/dataMasking.js';
@@ -29,7 +29,7 @@ function managementBlockReason(actor: NonNullable<AuthRequest['user']>, target: 
       return 'You can only manage permissions for users in your organization.';
     }
     const targetScope = roleScope(target.role);
-    if (targetScope !== 'BRANCH' && targetScope !== 'ORG') return 'You cannot manage this user.';
+    if (targetScope !== 'BRANCH' && targetScope !== 'REGION' && targetScope !== 'ORG') return 'You cannot manage this user.';
     if (targetRole === 'ORG_OWNER') return 'Organization owners cannot be managed by other staff.';
     if (actorRole === 'ORG_ADMIN' && targetRole === 'ORG_ADMIN') return 'Organization admins cannot manage each other.';
   }
@@ -298,6 +298,154 @@ router.delete('/me/switch-workspace', authenticate, authorize('PLATFORM_OWNER', 
       success: true,
       message: 'Workspace context cleared',
     });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Update a staff member's org-structure scope: home branch, managed branches,
+ * department, reporting line, employee ID and lifecycle status.
+ * PATCH /api/v1/users/:userId/scope
+ */
+router.patch('/:userId/scope', authenticate, requirePermission('staff:manage'), async (req: AuthRequest, res) => {
+  try {
+    const target = await User.findById(req.params.userId);
+    if (!target) return res.status(404).json({ success: false, error: 'User not found.' });
+    if (req.user!.id === target._id.toString()) {
+      return res.status(403).json({ success: false, error: 'You cannot change your own scope.' });
+    }
+    // Tenant check: the target must belong to the actor's organization.
+    if (!canAccessOrganization(req.user!, target.organizationId?.toString())) {
+      return res.status(403).json({ success: false, error: 'User is outside your organization.' });
+    }
+    const actorScope = roleScope(req.user!.role);
+    const orgLevel = actorScope === 'ORG' || actorScope === 'PLATFORM';
+
+    const { storeId, managedStoreIds, departmentId, reportsTo, employeeId, status } = req.body;
+    const previous = {
+      storeId: target.storeId, managedStoreIds: target.managedStoreIds, departmentId: target.departmentId,
+      reportsTo: target.reportsTo, employeeId: target.employeeId, status: target.status,
+    };
+
+    if (storeId !== undefined) {
+      if (storeId && !(await canAccessStore(req.user!, String(storeId)))) {
+        return res.status(403).json({ success: false, error: 'That branch is outside your scope.' });
+      }
+      target.storeId = storeId || undefined;
+    }
+    if (managedStoreIds !== undefined) {
+      if (!orgLevel) {
+        return res.status(403).json({ success: false, error: 'Only organization managers can change branch assignments.' });
+      }
+      const ids = Array.isArray(managedStoreIds) ? managedStoreIds.map(String).filter(Boolean) : [];
+      for (const id of ids) {
+        if (!(await canAccessStore(req.user!, id))) {
+          return res.status(403).json({ success: false, error: 'One of the selected branches is outside your scope.' });
+        }
+      }
+      target.managedStoreIds = ids as any;
+    }
+    if (departmentId !== undefined) target.departmentId = departmentId || undefined;
+    if (reportsTo !== undefined) {
+      if (reportsTo) {
+        const manager = await User.findById(reportsTo).select('organizationId');
+        if (!manager || manager.organizationId?.toString() !== target.organizationId?.toString()) {
+          return res.status(400).json({ success: false, error: 'Reporting manager must be in the same organization.' });
+        }
+      }
+      target.reportsTo = reportsTo || undefined;
+    }
+    if (employeeId !== undefined) target.employeeId = employeeId ? String(employeeId).trim() : undefined;
+    if (status !== undefined) {
+      const allowed = orgLevel ? ['ACTIVE', 'SUSPENDED', 'ON_LEAVE', 'DEACTIVATED'] : ['ACTIVE', 'SUSPENDED', 'ON_LEAVE'];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ success: false, error: `Status must be one of: ${allowed.join(', ')}` });
+      }
+      target.status = status;
+      // Deactivation/suspension also blocks login via the active flag.
+      target.active = status === 'ACTIVE';
+    }
+
+    await target.save();
+    await AuditLog.create({
+      actorId: req.user?.id, actorRole: req.user?.role, actorName: req.user?.name,
+      action: 'UPDATE_STAFF_SCOPE', entityType: 'USER', entityId: target._id.toString(),
+      storeId: target.storeId, previousValue: previous, newValue: req.body,
+      reason: req.body.reason || 'Staff scope update',
+    });
+    res.json({ success: true, user: { id: target._id, storeId: target.storeId, managedStoreIds: target.managedStoreIds, departmentId: target.departmentId, reportsTo: target.reportsTo, employeeId: target.employeeId, status: target.status } });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Add a secondary branch/department assignment (e.g. inventory manager at A,
+ * stock controller at B). POST /api/v1/users/:userId/assignments
+ */
+router.post('/:userId/assignments', authenticate, requirePermission('staff:assign'), async (req: AuthRequest, res) => {
+  try {
+    const target = await User.findById(req.params.userId);
+    if (!target) return res.status(404).json({ success: false, error: 'User not found.' });
+    if (!canAccessOrganization(req.user!, target.organizationId?.toString())) {
+      return res.status(403).json({ success: false, error: 'User is outside your organization.' });
+    }
+    const { storeId, departmentId, role, employeeId, reportsTo } = req.body;
+    if (!role || !['REGION_MANAGER', 'BRANCH_MANAGER', 'STOCK_CONTROLLER', 'SUPERVISOR', 'CASHIER_CUSTOMER_SERVICE', 'PICKER', 'PACKER_VERIFIER', 'EXIT_OFFICER', 'DELIVERY_COLLECTION_HANDOVER'].includes(role)) {
+      return res.status(400).json({ success: false, error: 'A valid branch-level role is required.' });
+    }
+    if (storeId && !(await canAccessStore(req.user!, String(storeId)))) {
+      return res.status(403).json({ success: false, error: 'That branch is outside your scope.' });
+    }
+    if (role === 'REGION_MANAGER' || role === 'BRANCH_MANAGER') {
+      // Multi-branch roles live on managedStoreIds, not in per-branch assignments.
+      return res.status(400).json({ success: false, error: 'Use the scope endpoint to assign manager roles.' });
+    }
+    const assignment = {
+      storeId: storeId || undefined,
+      departmentId: departmentId || undefined,
+      role,
+      employeeId: employeeId ? String(employeeId).trim() : undefined,
+      reportsTo: reportsTo || undefined,
+      status: 'ACTIVE' as const,
+      createdAt: new Date(),
+    };
+    target.assignments = [...(target.assignments || []), assignment];
+    await target.save();
+    await AuditLog.create({
+      actorId: req.user?.id, actorRole: req.user?.role, actorName: req.user?.name,
+      action: 'ADD_STAFF_ASSIGNMENT', entityType: 'USER', entityId: target._id.toString(),
+      storeId: storeId, newValue: assignment, reason: 'Additional staff assignment',
+    });
+    res.status(201).json({ success: true, assignments: target.assignments });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/** Suspend or remove an assignment by index. DELETE /api/v1/users/:userId/assignments/:index */
+router.delete('/:userId/assignments/:index', authenticate, requirePermission('staff:assign'), async (req: AuthRequest, res) => {
+  try {
+    const target = await User.findById(req.params.userId);
+    if (!target) return res.status(404).json({ success: false, error: 'User not found.' });
+    if (!canAccessOrganization(req.user!, target.organizationId?.toString())) {
+      return res.status(403).json({ success: false, error: 'User is outside your organization.' });
+    }
+    const index = Number(req.params.index);
+    const list = target.assignments || [];
+    if (!Number.isInteger(index) || index < 0 || index >= list.length) {
+      return res.status(404).json({ success: false, error: 'Assignment not found.' });
+    }
+    const removed = list.splice(index, 1)[0];
+    target.assignments = list;
+    await target.save();
+    await AuditLog.create({
+      actorId: req.user?.id, actorRole: req.user?.role, actorName: req.user?.name,
+      action: 'REMOVE_STAFF_ASSIGNMENT', entityType: 'USER', entityId: target._id.toString(),
+      storeId: removed.storeId, previousValue: removed, reason: 'Staff assignment removed',
+    });
+    res.json({ success: true, assignments: target.assignments });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }

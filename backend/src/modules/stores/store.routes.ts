@@ -96,6 +96,7 @@ router.get('/workspaces/all', authenticate, authorize('SYSTEM_ADMIN'), async (_r
 
 // Branch roles that appear in the staff directory, with plain-language labels for the role guide.
 const DIRECTORY_ROLES: Array<{ role: string; label: string }> = [
+  { role: 'REGION_MANAGER', label: 'Region Manager' },
   { role: 'BRANCH_MANAGER', label: 'Branch Manager' },
   { role: 'STORE_MANAGER', label: 'Store Manager (legacy)' },
   { role: 'SUPERVISOR', label: 'Supervisor' },
@@ -130,17 +131,17 @@ router.get('/staff-directory', authenticate, requirePermission('staff:read'), re
       storeQuery.organizationId = req.query.organizationId;
     }
 
-    const stores = await Store.find(storeQuery).select('name code location active').sort({ name: 1 });
+    const stores = await Store.find(storeQuery).select('name code location active regionId').sort({ name: 1 });
+    const storeIds = stores.map((s) => s._id);
     const staff = await User.find({
-      storeId: { $in: stores.map((s) => s._id) },
+      // Home-branch staff plus region/multi-branch managers who oversee these branches.
+      $or: [{ storeId: { $in: storeIds } }, { managedStoreIds: { $in: storeIds } }],
       role: roleFilter ? roleFilter : { $in: DIRECTORY_ROLES.map((r) => r.role) },
-    }).select('name phone email role storeId status lastLoginAt mfaEnabled permissionOverrides createdAt').sort({ name: 1 });
+    }).select('name phone email role storeId managedStoreIds status lastLoginAt mfaEnabled permissionOverrides createdAt').sort({ name: 1 });
 
     const byStore = new Map<string, any[]>();
     for (const member of staff as any[]) {
-      const key = String(member.storeId);
-      if (!byStore.has(key)) byStore.set(key, []);
-      byStore.get(key)!.push({
+      const entry = {
         id: member._id,
         name: member.name,
         phone: member.phone,
@@ -151,15 +152,24 @@ router.get('/staff-directory', authenticate, requirePermission('staff:read'), re
         mfaEnabled: !!member.mfaEnabled,
         extraPermissions: member.permissionOverrides?.granted || [],
         removedPermissions: member.permissionOverrides?.revoked || [],
+        managedStoreIds: (member.managedStoreIds || []).map(String),
         joinedAt: member.createdAt,
-      });
+      };
+      // A person appears under their home branch; region/multi-branch managers appear
+      // under every branch they oversee (flagged via managedStoreIds).
+      const keys = member.storeId ? [String(member.storeId)] : (member.managedStoreIds || []).map(String);
+      for (const key of keys) {
+        if (!storeIds.some((id) => String(id) === key)) continue;
+        if (!byStore.has(key)) byStore.set(key, []);
+        byStore.get(key)!.push(entry);
+      }
     }
 
     const branches = stores.map((store: any) => {
       const members = byStore.get(String(store._id)) || [];
       const roleCounts: Record<string, number> = {};
       for (const m of members) roleCounts[m.role] = (roleCounts[m.role] || 0) + 1;
-      return { storeId: store._id, name: store.name, code: store.code, location: store.location, active: store.active, roleCounts, staff: members };
+      return { storeId: store._id, name: store.name, code: store.code, location: store.location, active: store.active, regionId: store.regionId, roleCounts, staff: members };
     });
 
     const roleGuide = DIRECTORY_ROLES.map(({ role, label }) => ({
