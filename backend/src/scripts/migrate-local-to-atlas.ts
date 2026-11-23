@@ -60,7 +60,7 @@ async function migrateDb(src: MongoClient, dst: MongoClient, dbName: string) {
 
 async function main() {
   const src = new MongoClient(SOURCE_URI);
-  const dst = new MongoClient(ATLAS_URI);
+  const dst = new MongoClient(ATLAS_URI as string);
   await src.connect();
   await dst.connect();
   console.log(`Source: ${SOURCE_URI}`);
