@@ -1,4 +1,4 @@
-const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) || '/api/v1';
+export const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) || '/api/v1';
 
 // Unified token storage key: 'scango_access_token'
 const TOKEN_STORAGE_KEY = 'scango_access_token';

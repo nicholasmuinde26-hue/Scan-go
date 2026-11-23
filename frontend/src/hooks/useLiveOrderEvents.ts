@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { getToken } from '../api.js';
+import { API_BASE, getToken } from '../api.js';
 
 export interface LiveStreamEvent {
   type: string;
@@ -27,7 +27,7 @@ export function useLiveOrderEvents(onEvent?: EventCallback) {
         reconnectTimeout = setTimeout(connect, 4000);
         return;
       }
-      const streamUrl = `/api/v1/events/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+      const streamUrl = `${API_BASE}/events/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 
       try {
         eventSource = new EventSource(streamUrl);

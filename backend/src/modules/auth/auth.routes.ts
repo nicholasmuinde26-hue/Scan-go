@@ -46,7 +46,9 @@ function setRefreshTokenCookie(res: Response, refreshToken: string) {
   res.cookie('tusk_refresh_token', refreshToken, {
     httpOnly: true,
     secure: ENV.NODE_ENV === 'production',
-    sameSite: 'strict',
+    // 'none' is required when the web app is hosted on a different site than the API
+    // (e.g. Vercel frontend -> Render API); browsers only send it over HTTPS.
+    sameSite: ENV.NODE_ENV === 'production' ? 'none' : 'lax',
     maxAge: REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000,
     path: '/api/v1/auth',
   });
@@ -56,7 +58,7 @@ function clearRefreshTokenCookie(res: Response) {
   res.clearCookie('tusk_refresh_token', {
     httpOnly: true,
     secure: ENV.NODE_ENV === 'production',
-    sameSite: 'strict',
+    sameSite: ENV.NODE_ENV === 'production' ? 'none' : 'lax',
     path: '/api/v1/auth',
   });
 }
