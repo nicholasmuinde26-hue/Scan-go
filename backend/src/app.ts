@@ -46,6 +46,8 @@ export function createApp() {
     helmet({
       contentSecurityPolicy: false, // Allows cross-origin frontend SPA interaction in development
       crossOriginResourcePolicy: { policy: 'cross-origin' },
+      // Allow popups (Google Sign-In) to communicate back to the opener window.
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     })
   );
 

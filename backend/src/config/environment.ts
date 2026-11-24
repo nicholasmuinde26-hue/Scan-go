@@ -73,6 +73,7 @@ export const ENV = {
   PORT: process.env.PORT ? parseInt(process.env.PORT, 10) : 5000,
   MONGODB_URI: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/scan_and_go_db',
   JWT_SECRET: process.env.JWT_SECRET || 'super_secret_jwt_key_scan_and_go_2026',
+  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || '',
   HMAC_RECEIPT_SECRET: process.env.HMAC_RECEIPT_SECRET || 'hmac_supermarket_loss_prevention_key_9988',
   NODE_ENV: process.env.NODE_ENV || 'development',
   // Daraja configuration - MUST be set via environment variables in production

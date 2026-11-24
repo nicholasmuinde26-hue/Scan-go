@@ -5,6 +5,7 @@ import { ScanGoLogo } from '../components/ScanGoLogo.js';
 import { apiRequest, setToken } from '../api.js';
 import { postLoginPath } from '../presence.js';
 import { User, Store } from '../types.js';
+import { GoogleLogin } from '@react-oauth/google';
 
 interface CustomerLoginPageProps {
   onLoginSuccess: (user: User, token: string, allowedPortals: string[], defaultPortal: string) => void;
@@ -43,6 +44,33 @@ export const CustomerLoginPage: React.FC<CustomerLoginPageProps> = ({ onLoginSuc
       setLoading(false);
     }
   };
+
+  const handleGoogleSuccess = async (credentialResponse: { credential?: string }) => {
+    const credential = credentialResponse?.credential;
+    if (!credential) {
+      setErrorMsg('Google sign-in did not return a credential. Please try again.');
+      return;
+    }
+    try {
+      setLoading(true);
+      setErrorMsg(null);
+      const res = await apiRequest('/auth/google', {
+        method: 'POST',
+        body: JSON.stringify({ credential, isMobile: false }),
+      });
+      if (res?.token) {
+        setToken(res.token);
+        onLoginSuccess(res.user, res.token, res.allowedPortals || ['CUSTOMER'], res.defaultPortal || 'CUSTOMER');
+        navigate(postLoginPath());
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Google sign-in failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) || '';
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-azure-50 to-brand-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 font-sans">
@@ -114,6 +142,26 @@ export const CustomerLoginPage: React.FC<CustomerLoginPageProps> = ({ onLoginSuc
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
+
+          {googleClientId && (
+            <div className="space-y-3">
+              <div className="flex items-center space-x-3">
+                <div className="flex-1 h-px bg-slate-200" />
+                <span className="text-[11px] font-bold text-slate-400 uppercase">or</span>
+                <div className="flex-1 h-px bg-slate-200" />
+              </div>
+              <div className="flex justify-center">
+                <GoogleLogin
+                  onSuccess={handleGoogleSuccess}
+                  onError={() => setErrorMsg('Google sign-in failed. Please try again.')}
+                  theme="outline"
+                  size="large"
+                  width="100%"
+                  text="signin_with"
+                />
+              </div>
+            </div>
+          )}
 
           <div className="pt-4 border-t border-slate-100 text-center space-y-3">
             <p className="text-xs text-slate-500">

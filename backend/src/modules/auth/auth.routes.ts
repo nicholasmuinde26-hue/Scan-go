@@ -13,6 +13,9 @@ import { generateToken, authenticate, AuthRequest, getRolePortalConfig, effectiv
 import { UserRole } from '../../shared/types/index.js';
 import { validatePasswordStrength } from '../../shared/utils/passwordPolicy.js';
 import { ENV } from '../../config/environment.js';
+import { OAuth2Client } from 'google-auth-library';
+
+const googleClient = new OAuth2Client(ENV.GOOGLE_CLIENT_ID || undefined);
 import { phoneVariants } from '../../shared/utils/phone.js';
 
 const router = Router();
@@ -712,15 +715,52 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
 router.post('/google', async (req: Request, res: Response) => {
   try {
     const mobileClient = req.get('X-Client') === 'mobile' || req.body?.isMobile;
-    const { email, name, googleId, avatarUrl, phone } = req.body;
+    const { credential, email, name, googleId, avatarUrl, phone } = req.body;
 
-    if (!email && !googleId) {
-      res.status(400).json({ success: false, error: 'Email or Google ID is required.' });
-      return;
+    let cleanEmail: string | undefined;
+    let cleanGoogleId: string | undefined;
+    let cleanName: string | undefined;
+    let cleanAvatarUrl: string | undefined;
+
+    if (ENV.GOOGLE_CLIENT_ID) {
+      // Secure path: verify the Google ID token server-side. The client sends
+      // `credential` (the JWT from Google Sign-In); we never trust profile
+      // fields sent directly by the client.
+      if (!credential || typeof credential !== 'string') {
+        res.status(400).json({ success: false, error: 'Google credential is required.' });
+        return;
+      }
+      const ticket = await googleClient.verifyIdToken({
+        idToken: credential,
+        audience: ENV.GOOGLE_CLIENT_ID,
+      });
+      const payload = ticket.getPayload();
+      if (!payload?.sub || !payload.email) {
+        res.status(401).json({ success: false, error: 'Invalid Google token.' });
+        return;
+      }
+      if (payload.email_verified === false) {
+        res.status(401).json({ success: false, error: 'Google account email is not verified.' });
+        return;
+      }
+      cleanGoogleId = payload.sub;
+      cleanEmail = payload.email.toLowerCase();
+      cleanName = payload.name;
+      cleanAvatarUrl = payload.picture;
+    } else {
+      // Demo fallback: GOOGLE_CLIENT_ID not configured, so accept profile fields
+      // directly. INSECURE — anyone can impersonate any email. Set
+      // GOOGLE_CLIENT_ID to enforce real token verification.
+      console.warn('[Auth] GOOGLE_CLIENT_ID not set — /auth/google accepting unverified profile claims.');
+      if (!email && !googleId) {
+        res.status(400).json({ success: false, error: 'Email or Google ID is required.' });
+        return;
+      }
+      cleanEmail = email ? String(email).trim().toLowerCase() : undefined;
+      cleanGoogleId = googleId ? String(googleId).trim() : undefined;
+      cleanName = name ? String(name).trim() : undefined;
+      cleanAvatarUrl = avatarUrl ? String(avatarUrl) : undefined;
     }
-
-    const cleanEmail = email ? String(email).trim().toLowerCase() : undefined;
-    const cleanGoogleId = googleId ? String(googleId).trim() : undefined;
 
     // Find existing user by googleId or email
     let user = null;
@@ -755,10 +795,10 @@ router.post('/google', async (req: Request, res: Response) => {
       const passwordHash = await bcrypt.hash(randomPassword, 12);
 
       user = await User.create({
-        name: (name && String(name).trim()) || cleanEmail?.split('@')[0] || 'Google User',
+        name: cleanName || cleanEmail?.split('@')[0] || 'Google User',
         email: cleanEmail,
         googleId: cleanGoogleId,
-        avatarUrl,
+        avatarUrl: cleanAvatarUrl,
         phone: userPhone,
         passwordHash,
         role: 'CUSTOMER',
@@ -780,7 +820,7 @@ router.post('/google', async (req: Request, res: Response) => {
       });
     } else {
       if (cleanGoogleId && !user.googleId) user.googleId = cleanGoogleId;
-      if (avatarUrl && !user.avatarUrl) user.avatarUrl = avatarUrl;
+      if (cleanAvatarUrl && !user.avatarUrl) user.avatarUrl = cleanAvatarUrl;
       if (cleanEmail && !user.email) user.email = cleanEmail;
       await user.save();
     }
