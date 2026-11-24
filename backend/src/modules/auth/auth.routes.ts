@@ -247,6 +247,7 @@ router.post('/register', async (req: Request, res: Response) => {
     res.status(201).json({
       success: true,
       token,
+      refreshToken: `${sessionId}:${rawRefreshToken}`,
       user: {
         id: user._id,
         name: user.name,
@@ -478,6 +479,7 @@ router.post('/login', async (req: Request, res: Response) => {
     res.json({
       success: true,
       token,
+      refreshToken: `${sessionId}:${rawRefreshToken}`,
       mustChangePassword: user.mustChangePassword || false,
       mfaRequiredSetup: isPrivileged && !user.mfaEnabled,
       user: {
@@ -505,7 +507,9 @@ router.post('/login', async (req: Request, res: Response) => {
 // -------------------------------------------------------------
 router.post('/refresh', async (req: Request, res: Response) => {
   try {
-    const rawCookie = req.cookies?.tusk_refresh_token;
+    // Refresh token may arrive via httpOnly cookie OR request body (cross-site
+    // deployments where third-party cookies are blocked, e.g. Vercel -> Render).
+    const rawCookie = req.body?.refreshToken || req.cookies?.tusk_refresh_token;
     if (!rawCookie || !rawCookie.includes(':')) {
       res.status(401).json({ success: false, error: 'No refresh token provided.' });
       return;
@@ -558,6 +562,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
     res.json({
       success: true,
       token: newToken,
+      refreshToken: `${sessionId}:${newRawRefreshToken}`,
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -836,7 +841,7 @@ router.post('/google', async (req: Request, res: Response) => {
     res.status(200).json({
       success: true,
       token,
-      ...(mobileClient ? { refreshToken: `${sessionId}:${rawRefreshToken}` } : {}),
+      refreshToken: `${sessionId}:${rawRefreshToken}`,
       user: {
         id: user._id,
         name: user.name,

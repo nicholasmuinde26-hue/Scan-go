@@ -2,6 +2,7 @@ export const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) || 
 
 // Unified token storage key: 'scango_access_token'
 const TOKEN_STORAGE_KEY = 'scango_access_token';
+const REFRESH_TOKEN_KEY = 'scango_refresh_token';
 // Pre-rebrand key; migrated once so signed-in users are not logged out.
 const LEGACY_TOKEN_KEYS = ['tusk_access_token', 'tusk_token', 'scan_and_go_token'];
 
@@ -34,9 +35,17 @@ export function getToken(): string {
   return authToken;
 }
 
+export function getRefreshToken(): string {
+  return localStorage.getItem(REFRESH_TOKEN_KEY) || '';
+}
+function setRefreshToken(token: string) {
+  localStorage.setItem(REFRESH_TOKEN_KEY, token);
+}
+
 export function clearToken() {
   authToken = '';
   localStorage.removeItem(TOKEN_STORAGE_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
   // Also clear legacy keys
   LEGACY_TOKEN_KEYS.forEach((k) => localStorage.removeItem(k));
 }
@@ -65,11 +74,13 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
+        body: JSON.stringify({ refreshToken: getRefreshToken() || undefined }),
       });
       if (refreshRes.ok) {
         const refreshData = await refreshRes.json();
         if (refreshData?.token) {
           setToken(refreshData.token);
+          if (refreshData.refreshToken) setRefreshToken(refreshData.refreshToken);
           headers['Authorization'] = `Bearer ${refreshData.token}`;
           // Retry original request
           const retryRes = await fetch(`${API_BASE}${endpoint}`, {
@@ -95,6 +106,7 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
   }
 
   const data = await res.json().catch(() => ({}));
+  if (res.ok && data?.refreshToken) setRefreshToken(data.refreshToken);
   if (!res.ok) {
     const error: any = new Error(data.error || data.message || `API request failed with status ${res.status}`);
     error.data = data;
