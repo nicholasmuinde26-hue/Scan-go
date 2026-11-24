@@ -90,7 +90,8 @@ export const ENV = {
   // A card checkout page the customer walked away from is abandoned after this long.
   CARD_PENDING_EXPIRY_MS: parseInt(process.env.CARD_PENDING_EXPIRY_MS || String(30 * 60 * 1000), 10),
   // Number of reverse proxies in front of the API (0 = none). Needed for correct client IPs / rate limiting behind a proxy or ngrok.
-  TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS || '0', 10),
+  // Defaults to 1 in production since hosted platforms (Render, etc.) always sit behind a proxy.
+  TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS || (isProduction ? '1' : '0'), 10),
   FLUTTERWAVE_SECRET_KEY: process.env.FLUTTERWAVE_SECRET_KEY || '',
   FLUTTERWAVE_WEBHOOK_SECRET: process.env.FLUTTERWAVE_WEBHOOK_SECRET || '',
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
