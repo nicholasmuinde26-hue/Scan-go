@@ -424,7 +424,7 @@ async function seed() {
       isWeighted: false,
       highTheft: false,
       stock: 180,
-      image: 'https://images.unsplash.com/photo-1559591937-e1032338b584?auto=format&fit=crop&w=400&q=80',
+      image: 'https://images.unsplash.com/photo-1607619056574-7b8d3ee536b2?auto=format&fit=crop&w=400&q=80',
     },
   ];
 
