@@ -43,10 +43,12 @@ export default function ScanScreen() {
   const [mode, setMode] = useState<'checkin' | 'scan'>('checkin');
   const [activeTab, setActiveTab] = useState<'scanned' | 'list'>('scanned');
   const [busy, setBusy] = useState(false);
-  const [lastScannedCode, setLastScannedCode] = useState('');
   const [torchOn, setTorchOn] = useState(false);
   const [showManualInput, setShowManualInput] = useState(false);
   const [manualCode, setManualCode] = useState('');
+  const [zoom, setZoom] = useState(0);
+  const [lastScanLabel, setLastScanLabel] = useState('');
+  const recentScans = useRef<Map<string, number>>(new Map());
 
   const topPadding = Math.max(insets.top, 24) + 10;
   const bottomDockPadding = Math.max(insets.bottom, 16) + 12;
@@ -105,8 +107,18 @@ export default function ScanScreen() {
   }, [isScannerOpen]);
 
   const handleBarcodeScanned = async (data: string) => {
-    if (busy || data === lastScannedCode) return;
-    setLastScannedCode(data);
+    const now = Date.now();
+    const lastAt = recentScans.current.get(data) || 0;
+    // Per-code throttle: same barcode ignored for 2.5s (prevents frame-spam duplicates)
+    // while still letting the user intentionally rescan the same item shortly after.
+    if (busy || now - lastAt < 2500) return;
+    recentScans.current.set(data, now);
+    // Prune stale entries so the map can't grow unbounded during long sessions
+    if (recentScans.current.size > 200) {
+      for (const [code, ts] of recentScans.current) {
+        if (now - ts > 60_000) recentScans.current.delete(code);
+      }
+    }
     setBusy(true);
 
     try {
@@ -150,14 +162,15 @@ export default function ScanScreen() {
       setBasket(r.basket);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      // Close scanner modal after scan so user sees their basket item, or keep open if continuous
-      setIsScannerOpen(false);
+      // Continuous scanning: keep the camera open so the next item can be scanned
+      // immediately. Show a brief inline confirmation instead of closing the modal.
+      const items = r.basket.items || [];
+      setLastScanLabel(items.length ? items[items.length - 1].name : 'Item added');
+      setTimeout(() => setLastScanLabel(''), 1600);
     } catch (e: any) {
       notify(`${e instanceof Error ? e.message : 'Item barcode not recognized. Please retry or enter manually.'}`, 'error');
-      setLastScannedCode('');
     } finally {
       setBusy(false);
-      setTimeout(() => setLastScannedCode(''), 1800);
     }
   };
 
@@ -389,8 +402,10 @@ export default function ScanScreen() {
             style={StyleSheet.absoluteFill}
             facing="back"
             enableTorch={torchOn}
+            autofocus="on"
+            zoom={zoom}
             barcodeScannerSettings={{
-              barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'qr', 'code128'],
+              barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'qr', 'code128', 'code39', 'itf14'],
             }}
             onBarcodeScanned={({ data }) => handleBarcodeScanned(data)}
           />
@@ -447,6 +462,34 @@ export default function ScanScreen() {
                 />
               </View>
             </View>
+
+            {/* Scan confirmation badge (continuous mode) */}
+            {lastScanLabel ? (
+              <View style={s.scanBadge}>
+                <Text style={s.scanBadgeText}>✓ {lastScanLabel}</Text>
+              </View>
+            ) : null}
+
+            {/* Zoom controls for distance scanning */}
+            {mode === 'scan' && (
+              <View style={s.zoomPad}>
+                <Pressable
+                  style={[s.zoomBtn, zoom <= 0 && s.zoomBtnDisabled]}
+                  onPress={() => setZoom((z) => Math.max(0, +(z - 0.2).toFixed(2)))}
+                  disabled={zoom <= 0}
+                >
+                  <Text style={s.zoomBtnText}>−</Text>
+                </Pressable>
+                <Text style={s.zoomLabel}>{Math.round(zoom * 100)}%</Text>
+                <Pressable
+                  style={[s.zoomBtn, zoom >= 1 && s.zoomBtnDisabled]}
+                  onPress={() => setZoom((z) => Math.min(1, +(z + 0.2).toFixed(2)))}
+                  disabled={zoom >= 1}
+                >
+                  <Text style={s.zoomBtnText}>＋</Text>
+                </Pressable>
+              </View>
+            )}
 
             {/* Manual Code Entry Button (Image 5 Center) */}
             <View style={s.scannerBottomArea}>
@@ -1065,5 +1108,55 @@ const s = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 14,
+  },
+  scanBadge: {
+    position: 'absolute',
+    top: '38%',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(22,163,74,0.92)',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+    zIndex: 5,
+  },
+  scanBadgeText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  zoomPad: {
+    position: 'absolute',
+    right: 18,
+    top: '55%',
+    alignItems: 'center',
+    gap: 8,
+    zIndex: 5,
+  },
+  zoomBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(15,23,42,0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  zoomBtnDisabled: {
+    opacity: 0.4,
+  },
+  zoomBtnText: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '700',
+    lineHeight: 26,
+  },
+  zoomLabel: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+    backgroundColor: 'rgba(15,23,42,0.72)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    overflow: 'hidden',
   },
 });
