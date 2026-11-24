@@ -76,6 +76,7 @@ export const PlatformAdminLoginPage: React.FC<PlatformAdminLoginPageProps> = ({ 
               <label className="text-slate-400 block mb-1">Root Admin Identifier / Phone</label>
               <input
                 type="tel"
+                autoComplete="username tel"
                 required
                 placeholder="07xxxxxxxx"
                 value={phone}

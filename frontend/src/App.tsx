@@ -177,7 +177,7 @@ export function App() {
       setLoading(true);
 
       // 1. Fetch Stores
-      const storesRes = await apiRequest('/stores');
+      const storesRes = await apiRequest('/stores').catch(() => ({ stores: [] }));
       const storeList = storesRes.stores || [];
       setStores(storeList);
       const savedStoreId = localStorage.getItem('customerStoreId');
@@ -186,30 +186,35 @@ export function App() {
 
       // 2. Fetch Products
       if (activeStore) {
-        const prodRes = await apiRequest(`/products?storeId=${activeStore._id}`);
+        const prodRes = await apiRequest(`/products?storeId=${activeStore._id}`).catch(() => ({ products: [] }));
         setProducts(prodRes.products || []);
       }
 
       // 3. Verify session
       const token = getToken();
       if (token) {
-        const meRes = await apiRequest('/auth/me');
-        if (meRes?.user) {
-          setCurrentUser(meRes.user);
-          const scoped = applyStoreScope(meRes.user, storeList, activeStore);
-          if (scoped && scoped._id !== activeStore?._id) {
-            setCurrentStore(scoped);
-            const scopedProducts = await apiRequest(`/products?storeId=${scoped._id}`);
-            setProducts(scopedProducts.products || []);
+        try {
+          const meRes = await apiRequest('/auth/me');
+          if (meRes?.user) {
+            setCurrentUser(meRes.user);
+            const scoped = applyStoreScope(meRes.user, storeList, activeStore);
+            if (scoped && scoped._id !== activeStore?._id) {
+              setCurrentStore(scoped);
+              const scopedProducts = await apiRequest(`/products?storeId=${scoped._id}`).catch(() => ({ products: [] }));
+              setProducts(scopedProducts.products || []);
+            }
+            const { list, current } = normalizePortals(meRes.allowedPortals, meRes.defaultPortal);
+            setAllowedPortals(list);
+            if (current) setCurrentPortal(current);
           }
-          const { list, current } = normalizePortals(meRes.allowedPortals, meRes.defaultPortal);
-          setAllowedPortals(list);
-          if (current) setCurrentPortal(current);
+        } catch {
+          // Token is invalid/expired
+          clearToken();
+          setCurrentUser(null);
         }
       }
     } catch {
-      clearToken();
-      setCurrentUser(null);
+      // General error during startup: keep state graceful
     } finally {
       setLoading(false);
     }

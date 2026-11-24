@@ -47,6 +47,11 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const subKey = (s: { orderId: string; productId: string }) => `${s.orderId}:${s.productId}`;
 
   const loadOrders = useCallback(async () => {
+    if (!currentUser) {
+      setOrders([]);
+      setOrdersLoading(false);
+      return;
+    }
     try {
       const res = await apiRequest('/orders');
       const list: CustomerOrder[] = res.orders || [];
@@ -82,11 +87,12 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
 
   // Light polling while the tab is visible, as a fallback if the live stream drops.
   useEffect(() => {
+    if (!currentUser) return;
     const id = window.setInterval(() => {
       if (document.visibilityState === 'visible') loadOrders();
     }, 30_000);
     return () => window.clearInterval(id);
-  }, [loadOrders]);
+  }, [loadOrders, currentUser]);
 
   useLiveOrderEvents((event) => {
     if (event.type === 'substitution.requested' && event.payload?.orderId) {

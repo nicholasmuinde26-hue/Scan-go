@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { apiRequest } from './api.js';
+import { apiRequest, getToken } from './api.js';
 
 /** The shopper's in-store check-in, as returned by the server. */
 export interface PresenceSessionInfo {
@@ -114,7 +114,7 @@ export function usePresenceSession(storeId: string | undefined) {
   const [loading, setLoading] = useState(Boolean(storeId));
 
   const refresh = useCallback(async () => {
-    if (!storeId) {
+    if (!storeId || !getToken()) {
       setSession(null);
       setLoading(false);
       return;

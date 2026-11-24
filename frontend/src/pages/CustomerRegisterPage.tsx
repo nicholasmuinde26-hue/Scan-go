@@ -126,6 +126,7 @@ export const CustomerRegisterPage: React.FC<CustomerRegisterPageProps> = ({ onLo
                   </div>
                   <input
                     type="tel"
+                    autoComplete="tel"
                     required
                     placeholder="0712345678"
                     value={phone}
@@ -157,6 +158,7 @@ export const CustomerRegisterPage: React.FC<CustomerRegisterPageProps> = ({ onLo
                   </div>
                   <input
                     type="text"
+                    autoComplete="name"
                     required
                     placeholder="e.g. John Kamau"
                     value={name}
@@ -184,6 +186,7 @@ export const CustomerRegisterPage: React.FC<CustomerRegisterPageProps> = ({ onLo
                   </div>
                   <input
                     type="email"
+                    autoComplete="email"
                     placeholder="john@example.com"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -215,6 +218,7 @@ export const CustomerRegisterPage: React.FC<CustomerRegisterPageProps> = ({ onLo
                 <label className="text-xs font-bold text-slate-700 block mb-1">6-Digit Verification OTP *</label>
                 <input
                   type="text"
+                  autoComplete="one-time-code"
                   required
                   placeholder="123456"
                   maxLength={6}

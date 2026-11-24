@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { MapPin, ShieldCheck, AlertTriangle, ArrowRight } from 'lucide-react';
 import { ScanGoLogo } from '../components/ScanGoLogo.js';
-import { apiRequest } from '../api.js';
+import { apiRequest, getToken } from '../api.js';
 import { Store, User } from '../types.js';
 import { clearEntryCode, getDeviceId, getGps, markStartInScanAndGo, rememberEntryCode } from '../presence.js';
 
@@ -61,6 +61,11 @@ export const EnterStorePage: React.FC<Props> = ({ currentUser, stores, onSelectS
   }, [code, currentUser]);
 
   const checkIn = async () => {
+    if (!currentUser || !getToken()) {
+      setError('Please sign in to your shopper account first.');
+      navigate('/login');
+      return;
+    }
     setError('');
     setCheckingIn(true);
     try {
@@ -115,7 +120,7 @@ export const EnterStorePage: React.FC<Props> = ({ currentUser, stores, onSelectS
             </div>
           )}
 
-          {!loading && info && !currentUser && (
+          {!loading && info && (!currentUser || !getToken()) && (
             <div className="space-y-3">
               <p className="text-xs text-slate-600">Sign in to your shopper account to continue. You will come straight back here.</p>
               <Link to="/login" className="w-full flex items-center justify-center gap-2 bg-brand-600 hover:bg-brand-700 text-white font-bold py-3 rounded-xl text-xs transition">
@@ -131,7 +136,7 @@ export const EnterStorePage: React.FC<Props> = ({ currentUser, stores, onSelectS
             <p className="text-xs text-slate-600">In-store check-in is for shopper accounts. Staff accounts cannot start Scan &amp; Go.</p>
           )}
 
-          {!loading && info && currentUser && isShopper && (
+          {!loading && info && currentUser && isShopper && Boolean(getToken()) && (
             <div className="space-y-3">
               <div className="flex items-start gap-2 text-[11px] text-slate-500">
                 <ShieldCheck className="w-4 h-4 text-brand-600 shrink-0" />

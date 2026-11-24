@@ -72,6 +72,7 @@ export const CustomerLoginPage: React.FC<CustomerLoginPageProps> = ({ onLoginSuc
                 </div>
                 <input
                   type="tel"
+                  autoComplete="username tel"
                   required
                   placeholder="0712345678"
                   value={phone}
