@@ -5,6 +5,7 @@ import { ScanGoLogo } from '../components/ScanGoLogo.js';
 import { apiRequest, setToken } from '../api.js';
 import { postLoginPath } from '../presence.js';
 import { User } from '../types.js';
+import { GoogleLogin } from '@react-oauth/google';
 
 interface CustomerRegisterPageProps {
   onLoginSuccess: (user: User, token: string, allowedPortals: string[], defaultPortal: string) => void;
@@ -90,6 +91,33 @@ export const CustomerRegisterPage: React.FC<CustomerRegisterPageProps> = ({ onLo
     }
   };
 
+  const handleGoogleSuccess = async (credentialResponse: { credential?: string }) => {
+    const credential = credentialResponse?.credential;
+    if (!credential) {
+      setErrorMsg('Google sign-in did not return a credential. Please try again.');
+      return;
+    }
+    try {
+      setRegistering(true);
+      setErrorMsg(null);
+      const res = await apiRequest('/auth/google', {
+        method: 'POST',
+        body: JSON.stringify({ credential, isMobile: false }),
+      });
+      if (res?.token) {
+        setToken(res.token);
+        onLoginSuccess(res.user, res.token, res.allowedPortals || ['CUSTOMER'], res.defaultPortal || 'CUSTOMER');
+        navigate(postLoginPath());
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Google sign-up failed. Please try again.');
+    } finally {
+      setRegistering(false);
+    }
+  };
+
+  const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) || '';
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-azure-50 to-brand-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8 font-sans">
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center space-y-2">
@@ -113,6 +141,26 @@ export const CustomerRegisterPage: React.FC<CustomerRegisterPageProps> = ({ onLo
             <div className="bg-brand-50 border border-brand-200 text-brand-800 p-3.5 rounded-2xl text-xs space-y-1">
               <span className="font-bold block">Development OTP Code:</span>
               <span className="font-mono font-black text-base tracking-widest">{devOtpHint}</span>
+            </div>
+          )}
+
+          {googleClientId && (
+            <div className="space-y-3">
+              <div className="flex items-center space-x-3">
+                <div className="flex-1 h-px bg-slate-200" />
+                <span className="text-[11px] font-bold text-slate-400 uppercase">or sign up with</span>
+                <div className="flex-1 h-px bg-slate-200" />
+              </div>
+              <div className="flex justify-center">
+                <GoogleLogin
+                  onSuccess={handleGoogleSuccess}
+                  onError={() => setErrorMsg('Google sign-up failed. Please try again.')}
+                  theme="outline"
+                  size="large"
+                  width="100%"
+                  text="signup_with"
+                />
+              </div>
             </div>
           )}
 
