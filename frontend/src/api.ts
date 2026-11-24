@@ -50,7 +50,63 @@ export function clearToken() {
   LEGACY_TOKEN_KEYS.forEach((k) => localStorage.removeItem(k));
 }
 
+function jwtExpiresAt(token: string): number {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Single in-flight refresh: parallel 401s must share one rotation, otherwise
+// the first success invalidates the refresh token the others are still using.
+let refreshPromise: Promise<string | null> | null = null;
+
+function refreshAccessToken(): Promise<string | null> {
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      const refreshToken = getRefreshToken();
+      if (!refreshToken) {
+        clearToken();
+        return null;
+      }
+      try {
+        const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ refreshToken }),
+        });
+        if (!refreshRes.ok) {
+          clearToken();
+          return null;
+        }
+        const refreshData = await refreshRes.json();
+        if (!refreshData?.token) {
+          clearToken();
+          return null;
+        }
+        setToken(refreshData.token);
+        if (refreshData.refreshToken) setRefreshToken(refreshData.refreshToken);
+        return refreshData.token as string;
+      } catch {
+        clearToken();
+        return null;
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+  }
+  return refreshPromise;
+}
+
 export async function apiRequest<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  // Proactively refresh an expired/expiring token so requests don't 401 at all.
+  if (authToken && jwtExpiresAt(authToken) - Date.now() < 60_000) {
+    await refreshAccessToken();
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
@@ -69,44 +125,23 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
 
   // If 401 Unauthorized and not already calling refresh or login, attempt silent refresh
   if (res.status === 401 && !endpoint.startsWith('/auth/login') && !endpoint.startsWith('/auth/refresh')) {
-    const refreshToken = getRefreshToken();
-    if (refreshToken) {
-      try {
-        const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ refreshToken }),
-        });
-        if (refreshRes.ok) {
-          const refreshData = await refreshRes.json();
-          if (refreshData?.token) {
-            setToken(refreshData.token);
-            if (refreshData.refreshToken) setRefreshToken(refreshData.refreshToken);
-            headers['Authorization'] = `Bearer ${refreshData.token}`;
-            // Retry original request
-            const retryRes = await fetch(`${API_BASE}${endpoint}`, {
-              ...options,
-              headers,
-              credentials: 'include',
-            });
-            const retryData = await retryRes.json();
-            if (!retryRes.ok) {
-              const error: any = new Error(retryData.error || retryData.message || 'API request failed');
-              error.data = retryData;
-              error.status = retryRes.status;
-              throw error;
-            }
-            return retryData;
-          }
-        } else {
-          clearToken();
-        }
-      } catch {
-        clearToken();
+    const newToken = await refreshAccessToken();
+    if (newToken) {
+      headers['Authorization'] = `Bearer ${newToken}`;
+      // Retry original request
+      const retryRes = await fetch(`${API_BASE}${endpoint}`, {
+        ...options,
+        headers,
+        credentials: 'include',
+      });
+      const retryData = await retryRes.json();
+      if (!retryRes.ok) {
+        const error: any = new Error(retryData.error || retryData.message || 'API request failed');
+        error.data = retryData;
+        error.status = retryRes.status;
+        throw error;
       }
-    } else {
-      clearToken();
+      return retryData;
     }
   }
 
