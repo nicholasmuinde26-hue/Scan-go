@@ -798,6 +798,7 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
 
     next();
   } catch (error) {
+    console.error('[Auth] authenticate() failed:', error);
     res.status(401).json({ success: false, error: 'Invalid or expired authentication token.' });
   }
 }
