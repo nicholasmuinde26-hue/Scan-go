@@ -799,7 +799,11 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
     next();
   } catch (error) {
     console.error('[Auth] authenticate() failed:', error);
-    res.status(401).json({ success: false, error: 'Invalid or expired authentication token.' });
+    res.status(401).json({
+      success: false,
+      error: 'Invalid or expired authentication token.',
+      debug: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
   }
 }
 
