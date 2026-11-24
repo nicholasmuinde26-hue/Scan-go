@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Loader2, LifeBuoy, Send } from 'lucide-react';
-import { apiRequest } from '../../api.js';
+import { apiRequest, getToken } from '../../api.js';
 import { CustomerOrder } from './customerTypes.js';
 
 interface TicketMessage {
@@ -46,6 +46,11 @@ export const SupportSection: React.FC<Props> = ({ orders, prefill, onPrefillUsed
   const [reply, setReply] = useState('');
 
   const load = useCallback(async () => {
+    if (!getToken()) {
+      setTickets([]);
+      setLoading(false);
+      return;
+    }
     try {
       setError(null);
       const res = await apiRequest('/support/my/tickets');

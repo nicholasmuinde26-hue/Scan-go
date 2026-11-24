@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Product, Store, Order } from '../types.js';
-import { apiRequest, formatKes } from '../api.js';
+import { apiRequest, formatKes, getToken } from '../api.js';
 
 interface CustomerClickAndCollectProps {
   currentStore: Store;
@@ -47,6 +47,7 @@ export const CustomerClickAndCollect: React.FC<CustomerClickAndCollectProps> = (
 
   // Load customer orders
   const loadOrders = async () => {
+    if (!getToken()) return;
     try {
       const res = await apiRequest('/orders?orderType=CLICK_AND_COLLECT');
       if (res?.orders) {
