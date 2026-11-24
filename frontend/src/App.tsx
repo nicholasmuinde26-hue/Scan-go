@@ -17,6 +17,7 @@ import { User, Store, Product } from './types.js';
 import { apiRequest, setToken, clearToken, getToken } from './api.js';
 import { CardPaymentReturnPage } from './pages/CardPaymentReturnPage.js';
 import { EnterStorePage } from './pages/EnterStorePage.js';
+import { AppSplashScreen } from './components/AppSplashScreen.js';
 
 const KNOWN_PORTALS: PortalType[] = ['CUSTOMER', 'STAFF_PICKER', 'EXIT_OFFICER', 'SUPERVISOR', 'ADMIN'];
 
@@ -150,6 +151,7 @@ export function App() {
   const [currentStore, setCurrentStore] = useState<Store | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  const [initStep, setInitStep] = useState('Connecting to store network...');
 
 
   // Branch staff only ever see their own branch; org staff only their organization's branches.
@@ -175,6 +177,7 @@ export function App() {
   const initialize = async () => {
     try {
       setLoading(true);
+      setInitStep('Connecting to store network...');
 
       // 1. Fetch Stores
       const storesRes = await apiRequest('/stores').catch(() => ({ stores: [] }));
@@ -186,6 +189,7 @@ export function App() {
 
       // 2. Fetch Products
       if (activeStore) {
+        setInitStep('Loading store catalogue & inventory...');
         const prodRes = await apiRequest(`/products?storeId=${activeStore._id}`).catch(() => ({ products: [] }));
         setProducts(prodRes.products || []);
       }
@@ -193,6 +197,7 @@ export function App() {
       // 3. Verify session
       const token = getToken();
       if (token) {
+        setInitStep('Restoring your secure shopper session...');
         try {
           const meRes = await apiRequest('/auth/me');
           if (meRes?.user) {
@@ -213,6 +218,7 @@ export function App() {
           setCurrentUser(null);
         }
       }
+      setInitStep('Welcome to Scan & Go!');
     } catch {
       // General error during startup: keep state graceful
     } finally {
@@ -269,11 +275,15 @@ export function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-navy-800 flex items-center justify-center p-4">
-        <div className="text-xs font-bold text-slate-400 tracking-wider uppercase animate-pulse">
-          Initializing Secure Session...
-        </div>
-      </div>
+      <AppSplashScreen
+        statusText={initStep}
+        onRetry={() => {
+          void initialize();
+        }}
+        onBypass={() => {
+          setLoading(false);
+        }}
+      />
     );
   }
 
