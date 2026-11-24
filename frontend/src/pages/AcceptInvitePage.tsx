@@ -147,6 +147,7 @@ export const AcceptInvitePage: React.FC = () => {
                   </div>
                   <input
                     type="password"
+                    autoComplete="new-password"
                     required
                     minLength={12}
                     placeholder="••••••••••••"
@@ -165,6 +166,7 @@ export const AcceptInvitePage: React.FC = () => {
                   </div>
                   <input
                     type="password"
+                    autoComplete="new-password"
                     required
                     minLength={12}
                     placeholder="••••••••••••"

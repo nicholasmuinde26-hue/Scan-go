@@ -153,6 +153,7 @@ export const ForgotPasswordPage: React.FC = () => {
                   </div>
                   <input
                     type="password"
+                    autoComplete="new-password"
                     required
                     minLength={12}
                     placeholder="Min 12 characters"

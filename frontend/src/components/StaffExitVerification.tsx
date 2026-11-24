@@ -928,6 +928,7 @@ export const StaffExitVerification: React.FC<StaffExitVerificationProps> = ({ cu
               </label>
               <input
                 type="password"
+                autoComplete="current-password"
                 value={supervisorPin}
                 onChange={(e) => setSupervisorPin(e.target.value)}
                 placeholder="1234"

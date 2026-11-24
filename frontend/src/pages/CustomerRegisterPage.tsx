@@ -200,6 +200,7 @@ export const CustomerRegisterPage: React.FC<CustomerRegisterPageProps> = ({ onLo
                   </div>
                   <input
                     type="password"
+                    autoComplete="new-password"
                     required
                     minLength={12}
                     placeholder="Min 12 characters"

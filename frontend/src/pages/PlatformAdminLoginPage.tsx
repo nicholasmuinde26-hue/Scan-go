@@ -88,6 +88,7 @@ export const PlatformAdminLoginPage: React.FC<PlatformAdminLoginPageProps> = ({ 
               <label className="text-slate-400 block mb-1">Passphrase (12+ Characters)</label>
               <input
                 type="password"
+                autoComplete="current-password"
                 required
                 placeholder="••••••••••••"
                 value={password}

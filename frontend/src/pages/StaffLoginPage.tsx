@@ -101,6 +101,7 @@ export const StaffLoginPage: React.FC<StaffLoginPageProps> = ({ onLoginSuccess }
                 </div>
                 <input
                   type="password"
+                  autoComplete="current-password"
                   required
                   placeholder="••••••••••••"
                   value={password}

@@ -94,6 +94,7 @@ export const CustomerLoginPage: React.FC<CustomerLoginPageProps> = ({ onLoginSuc
                 </div>
                 <input
                   type="password"
+                  autoComplete="current-password"
                   required
                   placeholder="••••••••••••"
                   value={password}
