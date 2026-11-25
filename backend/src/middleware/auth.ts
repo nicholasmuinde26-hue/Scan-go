@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import { ENV } from '../config/environment.js';
 import User from '../modules/users/user.model.js';
 import { UserRole } from '../shared/types/index.js';
@@ -712,25 +713,33 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
       return;
     }
 
-    // Check organization active status
-    if (user.organizationId) {
-      const orgModule = await import('../modules/organizations/organization.model.js');
-      const Organization = orgModule.default;
-      const org = await (Organization as any).findById(user.organizationId);
-      if (org && org.status === 'SUSPENDED') {
-        res.status(403).json({ success: false, error: 'Your organization is suspended.' });
-        return;
+    // Check organization active status (guard against malformed IDs in legacy docs)
+    if (user.organizationId && mongoose.isValidObjectId(user.organizationId)) {
+      try {
+        const orgModule = await import('../modules/organizations/organization.model.js');
+        const Organization = orgModule.default;
+        const org = await (Organization as any).findById(user.organizationId);
+        if (org && org.status === 'SUSPENDED') {
+          res.status(403).json({ success: false, error: 'Your organization is suspended.' });
+          return;
+        }
+      } catch (orgErr) {
+        console.error('[Auth] organization lookup failed (non-fatal):', orgErr);
       }
     }
 
-    // Check store branch active status
-    if (user.storeId) {
-      const storeModule = await import('../modules/stores/store.model.js');
-      const Store = storeModule.default;
-      const branch = await (Store as any).findById(user.storeId);
-      if (branch && branch.active === false) {
-        res.status(403).json({ success: false, error: 'Your assigned store branch is currently inactive.' });
-        return;
+    // Check store branch active status (guard against malformed IDs in legacy docs)
+    if (user.storeId && mongoose.isValidObjectId(user.storeId)) {
+      try {
+        const storeModule = await import('../modules/stores/store.model.js');
+        const Store = storeModule.default;
+        const branch = await (Store as any).findById(user.storeId);
+        if (branch && branch.active === false) {
+          res.status(403).json({ success: false, error: 'Your assigned store branch is currently inactive.' });
+          return;
+        }
+      } catch (storeErr) {
+        console.error('[Auth] store lookup failed (non-fatal):', storeErr);
       }
     }
 
@@ -740,10 +749,14 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
       return;
     }
 
-    // Check break-glass access expiry
+    // Check break-glass access expiry — a failed save must never block auth
     if (user.breakGlassAccess?.active && user.breakGlassAccess.expiresAt && new Date() > user.breakGlassAccess.expiresAt) {
-      user.breakGlassAccess.active = false;
-      await user.save();
+      try {
+        user.breakGlassAccess.active = false;
+        await user.save();
+      } catch (saveErr) {
+        console.error('[Auth] break-glass expiry save failed (non-fatal):', saveErr);
+      }
     }
 
     // Start with role-based permissions
@@ -751,13 +764,15 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
 
     // Apply permission overrides (granted and revoked)
     if (user.permissionOverrides) {
+      const revoked = Array.isArray(user.permissionOverrides.revoked) ? user.permissionOverrides.revoked : [];
+      const granted = Array.isArray(user.permissionOverrides.granted) ? user.permissionOverrides.granted : [];
       // Remove revoked permissions
-      if (user.permissionOverrides.revoked && user.permissionOverrides.revoked.length > 0) {
-        permissions = permissions.filter(p => !user.permissionOverrides!.revoked.includes(p));
+      if (revoked.length > 0) {
+        permissions = permissions.filter(p => !revoked.includes(p));
       }
       // Add granted permissions, but never beyond what the role's scope may hold.
-      if (user.permissionOverrides.granted && user.permissionOverrides.granted.length > 0) {
-        permissions = [...permissions, ...filterGrantablePermissions(user.role, user.permissionOverrides.granted as Permission[])];
+      if (granted.length > 0) {
+        permissions = [...permissions, ...filterGrantablePermissions(user.role, granted as Permission[])];
       }
     }
 
@@ -784,9 +799,9 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
       role: user.role,
       storeId: effectiveStoreId,
       organizationId: effectiveOrganizationId,
-      managedStoreIds: (user.managedStoreIds || []).map((id: any) => id.toString()),
-      managedOrganizationIds: (user.managedOrganizationIds || []).map((id: any) => id.toString()),
-      assignments: (user.assignments || []).map((a: any) => ({
+      managedStoreIds: (Array.isArray(user.managedStoreIds) ? user.managedStoreIds : []).filter(Boolean).map((id: any) => id.toString()),
+      managedOrganizationIds: (Array.isArray(user.managedOrganizationIds) ? user.managedOrganizationIds : []).filter(Boolean).map((id: any) => id.toString()),
+      assignments: (Array.isArray(user.assignments) ? user.assignments : []).filter(Boolean).map((a: any) => ({
         storeId: a.storeId ? a.storeId.toString() : undefined,
         role: a.role,
         status: a.status,
