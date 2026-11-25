@@ -66,12 +66,12 @@ let refreshPromise: Promise<string | null> | null = null;
 function refreshAccessToken(): Promise<string | null> {
   if (!refreshPromise) {
     refreshPromise = (async () => {
-      const refreshToken = getRefreshToken();
-      if (!refreshToken) {
-        clearToken();
-        return null;
-      }
       try {
+        const refreshToken = getRefreshToken();
+        if (!refreshToken) {
+          clearToken();
+          return null;
+        }
         const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -136,6 +136,12 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
       });
       const retryData = await retryRes.json();
       if (!retryRes.ok) {
+        // A freshly-minted token was still rejected — the session is dead.
+        // Clear it and notify the app so it returns to login instead of looping.
+        if (retryRes.status === 401) {
+          clearToken();
+          window.dispatchEvent(new Event('scango:session-expired'));
+        }
         const error: any = new Error(retryData.error || retryData.message || 'API request failed');
         error.data = retryData;
         error.status = retryRes.status;

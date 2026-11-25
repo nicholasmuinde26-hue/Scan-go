@@ -247,6 +247,17 @@ export function App() {
     if (current) setCurrentPortal(current);
   };
 
+  // Session expired mid-use (dead refresh token): drop back to logged-out state.
+  useEffect(() => {
+    const onExpired = () => {
+      setCurrentUser(null);
+      setAllowedPortals([]);
+      setCurrentPortal('CUSTOMER');
+    };
+    window.addEventListener('scango:session-expired', onExpired);
+    return () => window.removeEventListener('scango:session-expired', onExpired);
+  }, []);
+
   const handleLogout = async () => {
     try {
       await apiRequest('/auth/logout', { method: 'POST' });
