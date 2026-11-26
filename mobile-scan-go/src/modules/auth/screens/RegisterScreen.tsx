@@ -11,7 +11,7 @@ import {
   Platform,
 } from 'react-native';
 import { router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { useRegister, useSendOtp } from '../hooks';
 import { GoogleButton } from '../../../shared/GoogleButton';
@@ -20,7 +20,6 @@ import { theme } from '../../../shared/theme';
 import { notify } from '../../../shared/ui/feedback';
 
 export default function RegisterScreen() {
-  const insets = useSafeAreaInsets();
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
@@ -31,8 +30,8 @@ export default function RegisterScreen() {
   const [showGoogleModal, setShowGoogleModal] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
-  const topPadding = Math.max(insets.top, 20) + 12;
-  const bottomPadding = Math.max(insets.bottom, 16) + 30;
+  const topPadding = useTopInset(12);
+  const bottomPadding = useBottomInset(30);
 
   const otpMutation = useSendOtp();
   const registerMutation = useRegister();

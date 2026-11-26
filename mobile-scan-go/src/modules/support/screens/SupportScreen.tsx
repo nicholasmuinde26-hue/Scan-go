@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import { useCreateTicket, useSendTicketMessage, useSupportTickets } from '../hooks';
 import type { SupportTicket } from '../types';
 import { notify } from '../../../shared/ui/feedback';
@@ -14,7 +14,6 @@ const TONE: Record<string, { bg: string; text: string }> = {
 };
 
 export default function Support() {
-  const insets = useSafeAreaInsets();
   const { orderId } = useLocalSearchParams<{ orderId?: string }>();
   const [subject, setSubject] = useState('');
   const [description, setDescription] = useState('');
@@ -29,8 +28,9 @@ export default function Support() {
   const tickets = ticketsQuery.data?.tickets || [];
   const selected = tickets.find((t) => t._id === selectedId) || null;
 
-  const topPadding = Math.max(insets.top, 24) + 12;
-  const bottomPadding = Math.max(insets.bottom, 16) + 32;
+  const topPadding = useTopInset(12);
+  const bottomPadding = useBottomInset(32);
+  const replyBarPadding = useBottomInset(8);
 
   useEffect(() => {
     if (selected?.messages?.length) {
@@ -100,7 +100,7 @@ export default function Support() {
           }}
         />
 
-        <View style={[s.replyBar, { paddingBottom: Math.max(insets.bottom, 12) + 8 }]}>
+        <View style={[s.replyBar, { paddingBottom: replyBarPadding }]}>
           <TextInput
             value={reply}
             onChangeText={setReply}

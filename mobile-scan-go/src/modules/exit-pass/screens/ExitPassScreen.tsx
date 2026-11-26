@@ -1,16 +1,15 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import QRCode from 'react-native-qrcode-svg';
 import { useExitPass } from '../hooks';
 
 export default function ExitPassScreen() {
-  const insets = useSafeAreaInsets();
   const { orderId } = useLocalSearchParams<{ orderId: string }>();
   const pass = useExitPass(orderId);
 
-  const topPadding = Math.max(insets.top, 24) + 12;
-  const bottomPadding = Math.max(insets.bottom, 16) + 20;
+  const topPadding = useTopInset(12);
+  const bottomPadding = useBottomInset(20);
 
   return (
     <View style={[s.page, { paddingTop: topPadding, paddingBottom: bottomPadding }]}>

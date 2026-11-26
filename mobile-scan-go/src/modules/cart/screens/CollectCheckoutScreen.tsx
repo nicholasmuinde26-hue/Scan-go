@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import { useCustomer } from '../../auth';
 import { useCollectCart } from '../store';
 import { useCreateCollectOrder } from '../hooks';
@@ -11,7 +11,6 @@ import { useStartMpesa } from '../../payments/hooks';
 import { notify } from '../../../shared/ui/feedback';
 
 export default function CollectCheckoutScreen() {
-  const insets = useSafeAreaInsets();
   const [store, setStore] = useState<Store | null>(null);
   const [slot, setSlot] = useState<any>(null);
   const [plan, setPlan] = useState<'FULL' | 'DEPOSIT'>('FULL');
@@ -22,8 +21,8 @@ export default function CollectCheckoutScreen() {
   const createOrder = useCreateCollectOrder();
   const mpesa = useStartMpesa();
 
-  const topPadding = Math.max(insets.top, 24) + 12;
-  const bottomPadding = Math.max(insets.bottom, 16) + 32;
+  const topPadding = useTopInset(12);
+  const bottomPadding = useBottomInset(32);
 
   useEffect(() => {
     currentStore.get().then(setStore);

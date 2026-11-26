@@ -12,7 +12,7 @@ import {
   View,
 } from 'react-native';
 import { router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import * as Haptics from 'expo-haptics';
 import { useCustomer } from '../../auth';
 import {
@@ -28,7 +28,6 @@ import { formatKes } from '../../../shared/money';
 import { notify } from '../../../shared/ui/feedback';
 
 export default function CheckoutScreen() {
-  const insets = useSafeAreaInsets();
   const [phone, setPhone] = useState('');
   const [cardEmail, setCardEmail] = useState('');
   const [paymentId, setPaymentId] = useState('');
@@ -39,8 +38,8 @@ export default function CheckoutScreen() {
   const [busy, setBusy] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<'mpesa' | 'card'>('mpesa');
 
-  const topPadding = Math.max(insets.top, 24) + 10;
-  const bottomDockPadding = Math.max(insets.bottom, 16) + 14;
+  const topPadding = useTopInset(10);
+  const bottomDockPadding = useBottomInset(14);
 
   const customer = useCustomer();
   const checkout = useCheckoutBasket();

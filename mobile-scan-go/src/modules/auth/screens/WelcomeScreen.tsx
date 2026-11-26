@@ -16,7 +16,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import Svg, { Path, Rect, Circle, G } from 'react-native-svg';
 import { theme } from '../../../shared/theme';
 import { GoogleButton } from '../../../shared/GoogleButton';
@@ -135,7 +135,6 @@ function SlideIllustration({ type }: { type: Slide['iconType'] }) {
 }
 
 export default function WelcomeScreen() {
-  const insets = useSafeAreaInsets();
   const [activeIndex, setActiveIndex] = useState(0);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showGoogleModal, setShowGoogleModal] = useState(false);
@@ -147,8 +146,8 @@ export default function WelcomeScreen() {
   const [otp, setOtp] = useState('');
   const [newPassword, setNewPassword] = useState('');
 
-  const topPadding = Math.max(insets.top, 20) + 10;
-  const bottomPadding = Math.max(insets.bottom, 16) + 12;
+  const topPadding = useTopInset(10);
+  const bottomPadding = useBottomInset(12);
 
   const flatListRef = useRef<FlatList>(null);
   const loginMutation = useLogin();
