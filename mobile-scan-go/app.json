@@ -36,7 +36,8 @@
         {
           "locationWhenInUsePermission": "Confirm your presence at a participating store."
         }
-      ]
+      ],
+      "expo-audio"
     ],
     "experiments": {
       "typedRoutes": true

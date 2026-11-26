@@ -3,6 +3,8 @@ import { connectDatabase } from './config/database.js';
 import { ENV } from './config/environment.js';
 import { startReconciliationWorker } from './modules/payments/reconciliation.job.js';
 import { ensurePlanCatalogue, startSubscriptionLifecycleWorker } from './modules/subscriptions/subscription.service.js';
+import { startPresenceJanitor } from './modules/presence/presence.service.js';
+import { startMqttGateway } from './modules/devices/mqtt.service.js';
 
 async function bootstrap() {
   await connectDatabase();
@@ -12,6 +14,8 @@ async function bootstrap() {
   // Start Daraja background reconciliation worker for stuck orders
   startReconciliationWorker();
   startSubscriptionLifecycleWorker();
+  startPresenceJanitor();
+  startMqttGateway();
 
   app.listen(ENV.PORT, () => {
     console.log(`=======================================================`);

@@ -12,6 +12,7 @@ import AuditLog from '../audits/audit.model.js';
 import { broadcastEvent } from '../../shared/utils/eventStream.js';
 import SerializedTag from '../baskets/serialized-tag.model.js';
 import { resolvePolicy, tierPolicy, endSessionForOrder } from '../presence/presence.service.js';
+import { consultAiExitVerification, AiObservedEvidence } from '../../services/aiVision.client.js';
 
 const router = Router();
 
@@ -158,6 +159,62 @@ router.post('/verify-receipt', authenticate, requirePermission('exit:scan'), asy
       }
     }
 
+    // AI exit-verification sidecar (optional): reconciles the server-verified
+    // basket + payment state against camera/scanner/sensor evidence supplied by
+    // the exit lane. Advisory only — it can escalate the band, never downgrade
+    // it, and the whole call is skipped when AI_SERVICE_URL is unset or the
+    // service is unreachable.
+    const orderPaidForAi = order.status === 'PAID' || order.status === 'READY_FOR_PICKUP' || order.status === 'VERIFIED_AND_PACKED';
+    const aiAssessment = await consultAiExitVerification({
+      orderId: order._id.toString(),
+      storeId: order.storeId.toString(),
+      exitEventId: undefined,
+      expected: {
+        items: order.items.map((i: any) => ({
+          barcode: i.barcode,
+          name: i.productName,
+          quantity: i.quantity,
+          unitPriceMinor: i.unitPriceMinor,
+        })),
+        totalMinor: order.totalMinor,
+        totalItems: order.totalItems,
+        paid: orderPaidForAi,
+        paymentStatus: order.status,
+      },
+      observed: (req.body?.observed as AiObservedEvidence) || undefined,
+      context: {
+        exitLaneId,
+        trustTier: order.trustTier ?? null,
+        // Aggregated behavioural features for the AI fraud scorer — counters
+        // only, no PII. The Python service turns these into explainable signals.
+        fraudFeatures: {
+          removalCount: basketForExit?.removalCount ?? removalCount,
+          manualEntryCount: basketForExit?.manualEntryCount ?? manualEntries,
+          unknownBarcodeCount: basketForExit?.unknownBarcodeCount ?? unknownBarcodeEvents,
+          totalItems: order.totalItems,
+          expectedWeightGrams: basketForExit?.expectedWeightGrams ?? undefined,
+          priorConfirmedDiscrepancies: customer?.confirmedDiscrepancies ?? 0,
+          priorCleanTrips: customer?.cleanTrips ?? 0,
+          isGuest: Boolean((customer as any)?.isGuest),
+        },
+      },
+    });
+
+    if (aiAssessment) {
+      const bandRank: Record<string, number> = { GREEN: 0, AMBER: 1, AMBER_FULL: 2, RED: 3 };
+      const aiRank = aiAssessment.decision === 'RED' ? 3 : aiAssessment.decision === 'AMBER' ? 1 : 0;
+      if (aiRank > (bandRank[risk.band] ?? 0)) {
+        risk.band = aiAssessment.decision === 'RED' ? 'RED' : 'AMBER';
+        risk.score = Math.max(risk.score, aiAssessment.decision === 'RED' ? 100 : aiAssessment.score);
+        for (const reason of aiAssessment.reasons.filter((r) => !r.startsWith('AI_EXIT:'))) {
+          risk.reasons.push(`AI_VISION: ${reason}`);
+        }
+        for (const task of aiAssessment.tasks) {
+          if (!risk.mandatoryTasks.includes(task)) risk.mandatoryTasks.push(task);
+        }
+      }
+    }
+
     const isGreen = risk.band === 'GREEN' && !receiptAlreadyUsed && tokenResult.valid;
     const physicalCheckRequired = !isGreen;
 
@@ -206,6 +263,7 @@ router.post('/verify-receipt', authenticate, requirePermission('exit:scan'), asy
       riskScore: risk.score,
       riskBand: risk.band,
       riskReasons: risk.reasons,
+      aiAssessment: aiAssessment || undefined,
       physicalCheckRequired,
       physicalCheckSubmitted: false,
       clearanceDecision,
@@ -285,6 +343,7 @@ router.post('/verify-receipt', authenticate, requirePermission('exit:scan'), asy
       weighedItems,
       taggedItems,
       expectedWeighedWeightGrams,
+      aiAssessment: aiAssessment || null,
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

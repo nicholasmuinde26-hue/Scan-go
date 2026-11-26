@@ -28,7 +28,8 @@ export interface StreamEvent {
     | 'discrepancy.escalated'
     | 'store.config_updated'
     | 'approval.created'
-    | 'stock.adjusted';
+    | 'stock.adjusted'
+    | 'device.event';
   payload: any;
   storeId?: string;
   targetRoles?: string[];

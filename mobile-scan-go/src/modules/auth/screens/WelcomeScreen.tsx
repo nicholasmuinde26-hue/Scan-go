@@ -21,7 +21,7 @@ import Svg, { Path, Rect, Circle, G } from 'react-native-svg';
 import { theme } from '../../../shared/theme';
 import { GoogleButton } from '../../../shared/GoogleButton';
 import { GoogleSignInModal } from '../components/GoogleSignInModal';
-import { useLogin } from '../hooks';
+import { useLogin, useSendOtp, useResetPassword } from '../hooks';
 import { notify } from '../../../shared/ui/feedback';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -141,12 +141,55 @@ export default function WelcomeScreen() {
   const [showGoogleModal, setShowGoogleModal] = useState(false);
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [modalMode, setModalMode] = useState<'login' | 'forgot'>('login');
+  const [forgotStep, setForgotStep] = useState<1 | 2>(1);
+  const [otp, setOtp] = useState('');
+  const [newPassword, setNewPassword] = useState('');
 
   const topPadding = Math.max(insets.top, 20) + 10;
   const bottomPadding = Math.max(insets.bottom, 16) + 12;
 
   const flatListRef = useRef<FlatList>(null);
   const loginMutation = useLogin();
+  const otpMutation = useSendOtp();
+  const resetMutation = useResetPassword();
+
+  const openLoginModal = () => {
+    setModalMode('login');
+    setForgotStep(1);
+    setOtp('');
+    setNewPassword('');
+    setShowLoginModal(true);
+  };
+
+  const handleSendResetOtp = async () => {
+    if (!phone.trim()) return notify('Enter your registered phone number first.', 'info');
+    try {
+      const r = await otpMutation.mutateAsync({ phone: phone.trim(), purpose: 'FORGOT_PASSWORD' });
+      setForgotStep(2);
+      notify(`Code sent: ${r.devOtpCode ? `Development code: ${r.devOtpCode}` : 'Check your SMS for the 6-digit code.'}`, 'info');
+    } catch (e: any) {
+      notify(`Could not send code: ${e instanceof Error ? e.message : 'Please try again.'}`, 'error');
+    }
+  };
+
+  const handleResetPassword = async () => {
+    if (!otp.trim() || newPassword.length < 12) {
+      return notify('Enter the 6-digit code and a new password (min 12 characters).', 'info');
+    }
+    try {
+      await resetMutation.mutateAsync({ phone: phone.trim(), otp: otp.trim(), newPassword });
+      notify('Password updated! You can now sign in.', 'info');
+      setModalMode('login');
+      setForgotStep(1);
+      setOtp('');
+      setNewPassword('');
+      setPassword('');
+    } catch (e: any) {
+      notify(`Reset failed: ${e instanceof Error ? e.message : 'Please try again.'}`, 'error');
+    }
+  };
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const scrollOffset = event.nativeEvent.contentOffset.x;
@@ -217,7 +260,7 @@ export default function WelcomeScreen() {
         <View style={s.buttonRow}>
           <Pressable
             style={s.loginButton}
-            onPress={() => setShowLoginModal(true)}
+            onPress={openLoginModal}
           >
             <Text style={s.loginButtonText}>Login</Text>
           </Pressable>
@@ -239,7 +282,7 @@ export default function WelcomeScreen() {
         {/* Guest / Shopper Link */}
         <Pressable
           style={s.guestLink}
-          onPress={() => router.replace('/(tabs)')}
+          onPress={() => router.push('/guest')}
         >
           <Text style={s.guestText}>
             Not looking for groceries?{' '}
@@ -263,50 +306,133 @@ export default function WelcomeScreen() {
         >
           <View style={s.modalSheet}>
             <View style={s.sheetHandle} />
-            <Text style={s.modalTitle}>Welcome back</Text>
-            <Text style={s.modalSubtitle}>Sign in with your registered phone number</Text>
 
-            <Text style={s.fieldLabel}>PHONE NUMBER</Text>
-            <TextInput
-              value={phone}
-              onChangeText={setPhone}
-              placeholder="07XX XXX XXX or +254..."
-              keyboardType="phone-pad"
-              style={s.input}
-            />
+            {modalMode === 'login' ? (
+              <>
+                <Text style={s.modalTitle}>Welcome back</Text>
+                <Text style={s.modalSubtitle}>Sign in with your registered phone number</Text>
 
-            <Text style={s.fieldLabel}>PASSWORD</Text>
-            <TextInput
-              value={password}
-              onChangeText={setPassword}
-              placeholder="Your password"
-              secureTextEntry
-              style={s.input}
-            />
+                <Text style={s.fieldLabel}>PHONE NUMBER</Text>
+                <TextInput
+                  value={phone}
+                  onChangeText={setPhone}
+                  placeholder="07XX XXX XXX or +254..."
+                  keyboardType="phone-pad"
+                  style={s.input}
+                />
 
-            <Pressable
-              style={s.submitButton}
-              onPress={handleLoginSubmit}
-              disabled={loginMutation.isPending}
-            >
-              <Text style={s.submitButtonText}>
-                {loginMutation.isPending ? 'Signing in…' : 'Sign in'}
-              </Text>
-            </Pressable>
+                <Text style={s.fieldLabel}>PASSWORD</Text>
+                <View style={s.passwordWrap}>
+                  <TextInput
+                    value={password}
+                    onChangeText={setPassword}
+                    placeholder="Your password"
+                    secureTextEntry={!showPassword}
+                    style={[s.input, s.passwordInput]}
+                  />
+                  <Pressable style={s.eyeBtn} onPress={() => setShowPassword(!showPassword)}>
+                    <Text style={s.eyeText}>{showPassword ? '🙈' : '👁'}</Text>
+                  </Pressable>
+                </View>
 
-            <View style={s.modalDivider}>
-              <View style={s.dividerLine} />
-              <Text style={s.dividerText}>or</Text>
-              <View style={s.dividerLine} />
-            </View>
+                <Pressable
+                  style={s.forgotLink}
+                  onPress={() => { setModalMode('forgot'); setForgotStep(1); }}
+                >
+                  <Text style={s.forgotText}>Forgot password?</Text>
+                </Pressable>
 
-            <GoogleButton
-              title="Sign in with Google"
-              onPress={() => {
-                setShowLoginModal(false);
-                setShowGoogleModal(true);
-              }}
-            />
+                <Pressable
+                  style={s.submitButton}
+                  onPress={handleLoginSubmit}
+                  disabled={loginMutation.isPending}
+                >
+                  <Text style={s.submitButtonText}>
+                    {loginMutation.isPending ? 'Signing in…' : 'Sign in'}
+                  </Text>
+                </Pressable>
+
+                <View style={s.modalDivider}>
+                  <View style={s.dividerLine} />
+                  <Text style={s.dividerText}>or</Text>
+                  <View style={s.dividerLine} />
+                </View>
+
+                <GoogleButton
+                  title="Sign in with Google"
+                  onPress={() => {
+                    setShowLoginModal(false);
+                    setShowGoogleModal(true);
+                  }}
+                />
+              </>
+            ) : (
+              <>
+                <Pressable onPress={() => setModalMode('login')} style={s.backToLogin}>
+                  <Text style={s.backToLoginText}>‹  Back to sign in</Text>
+                </Pressable>
+                <Text style={s.modalTitle}>Reset password</Text>
+                <Text style={s.modalSubtitle}>
+                  {forgotStep === 1
+                    ? 'Enter your phone number and we\'ll send a verification code.'
+                    : 'Enter the code from your SMS and choose a new password.'}
+                </Text>
+
+                {forgotStep === 1 ? (
+                  <>
+                    <Text style={s.fieldLabel}>PHONE NUMBER</Text>
+                    <TextInput
+                      value={phone}
+                      onChangeText={setPhone}
+                      placeholder="07XX XXX XXX or +254..."
+                      keyboardType="phone-pad"
+                      style={s.input}
+                    />
+                    <Pressable
+                      style={s.submitButton}
+                      onPress={handleSendResetOtp}
+                      disabled={otpMutation.isPending}
+                    >
+                      <Text style={s.submitButtonText}>
+                        {otpMutation.isPending ? 'Sending…' : 'Send verification code'}
+                      </Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <>
+                    <Text style={s.fieldLabel}>VERIFICATION CODE</Text>
+                    <TextInput
+                      value={otp}
+                      onChangeText={setOtp}
+                      placeholder="6-digit code"
+                      keyboardType="number-pad"
+                      maxLength={6}
+                      style={s.input}
+                    />
+                    <Text style={s.fieldLabel}>NEW PASSWORD (min 12 chars)</Text>
+                    <TextInput
+                      value={newPassword}
+                      onChangeText={setNewPassword}
+                      placeholder="Choose a strong password"
+                      secureTextEntry={!showPassword}
+                      style={s.input}
+                    />
+                    <Pressable
+                      style={s.submitButton}
+                      onPress={handleResetPassword}
+                      disabled={resetMutation.isPending}
+                    >
+                      <Text style={s.submitButtonText}>
+                        {resetMutation.isPending ? 'Updating…' : 'Reset password'}
+                      </Text>
+                    </Pressable>
+                    <Pressable style={s.forgotLink} onPress={handleSendResetOtp}>
+                      <Text style={s.forgotText}>Resend code</Text>
+                    </Pressable>
+                  </>
+                )}
+              </>
+            )}
 
             <Pressable
               style={s.closeModal}
@@ -497,6 +623,42 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E2E8F0',
     color: '#0F172A',
+  },
+  passwordWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  passwordInput: {
+    flex: 1,
+    paddingRight: 48,
+  },
+  eyeBtn: {
+    position: 'absolute',
+    right: 12,
+    padding: 6,
+  },
+  eyeText: {
+    fontSize: 16,
+  },
+  forgotLink: {
+    alignSelf: 'flex-end',
+    marginTop: 10,
+    paddingVertical: 4,
+  },
+  forgotText: {
+    color: '#16A34A',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  backToLogin: {
+    alignSelf: 'flex-start',
+    marginBottom: 8,
+    paddingVertical: 4,
+  },
+  backToLoginText: {
+    color: '#16A34A',
+    fontSize: 14,
+    fontWeight: '700',
   },
   submitButton: {
     height: 52,

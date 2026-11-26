@@ -1,6 +1,7 @@
 import React from 'react';
 import { ShoppingBag, Clock, MapPin, LifeBuoy, User } from 'lucide-react';
 import { CustomerSection } from './customerTypes.js';
+import { GetTheAppButton } from '../../components/GetTheAppButton';
 
 interface Props {
   activeSection: CustomerSection;
@@ -48,5 +49,6 @@ export const CustomerTopBar: React.FC<Props> = ({ activeSection, setActiveSectio
         </button>
       );
     })}
+    <GetTheAppButton className="ml-auto" />
   </nav>
 );

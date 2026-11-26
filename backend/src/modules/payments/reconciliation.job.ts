@@ -13,6 +13,7 @@ import { sweepNoShowOrders } from '../orders/collectNoShow.job.js';
 import { collectDeadline } from '../../shared/utils/clickCollect.js';
 import { sendSms } from '../../shared/utils/sms.js';
 import SerializedTag from '../baskets/serialized-tag.model.js';
+import { mirrorOrder, mirrorPayment } from '../financial/financial-ledger.service.js';
 
 /**
  * Fulfills an order once payment is confirmed valid (shared between callback & reconciliation).
@@ -198,6 +199,10 @@ export async function finalizeSuccessfulPayment(
     targetUserId: order.customerId.toString(),
   });
 
+  // PostgreSQL financial ledger mirror (no-op unless POSTGRES_URL is set).
+  void mirrorPayment(payment, order);
+  void mirrorOrder(order);
+
   return { success: true, signedQrToken, receiptNo };
 }
 
@@ -230,6 +235,7 @@ async function failPendingPayment(
     storeId: order.storeId,
     reason: message,
   });
+  void mirrorPayment(payment, order);
 }
 
 /**

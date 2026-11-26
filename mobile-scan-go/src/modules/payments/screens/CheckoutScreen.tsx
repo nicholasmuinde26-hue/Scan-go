@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Alert,
+  ActivityIndicator,
   FlatList,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -21,14 +22,19 @@ import {
   useUpdateBasketLine,
 } from '../../basket';
 import { usePaymentStatus, useStartMpesa } from '../hooks';
+import { paymentsApi } from '../api';
 import type { Basket, BasketLine } from '../../basket/types';
+import { formatKes } from '../../../shared/money';
 import { notify } from '../../../shared/ui/feedback';
 
 export default function CheckoutScreen() {
   const insets = useSafeAreaInsets();
   const [phone, setPhone] = useState('');
+  const [cardEmail, setCardEmail] = useState('');
   const [paymentId, setPaymentId] = useState('');
+  const [orderId, setOrderId] = useState('');
   const [basket, setBasket] = useState<Basket | null>(null);
+  const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('Review your items and complete payment.');
   const [busy, setBusy] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<'mpesa' | 'card'>('mpesa');
@@ -42,32 +48,43 @@ export default function CheckoutScreen() {
   const payment = usePaymentStatus(paymentId, !!paymentId);
   const updateLineMutation = useUpdateBasketLine();
 
-  useEffect(() => {
-    activeBasket.get().then((basketId) => {
-      if (basketId) {
-        // Fetch current basket items if possible or read
-        (basketApi as any)
-          .open
-          ? null
-          : null;
+  const loadBasket = useCallback(async () => {
+    const basketId = await activeBasket.get();
+    if (!basketId) {
+      setBasket(null);
+      setLoading(false);
+      return;
+    }
+    try {
+      const r = await basketApi.get(basketId);
+      if (r.basket.status !== 'OPEN') {
+        await activeBasket.clear();
+        setBasket(null);
+      } else {
+        setBasket(r.basket);
       }
-    });
+    } catch {
+      setBasket(null);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    if (customer.data?.user?.phone && !phone) {
-      setPhone(customer.data.user.phone);
-    }
+    loadBasket();
+  }, [loadBasket]);
+
+  useEffect(() => {
+    const user = customer.data?.user as any;
+    if (user?.phone && !phone) setPhone(user.phone);
+    if (user?.email && !cardEmail) setCardEmail(user.email);
   }, [customer.data]);
 
   useEffect(() => {
     if (payment.data?.status === 'SUCCESS') {
       activeBasket.clear();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      router.replace({
-        pathname: '/pass',
-        params: { orderId: payment.data.orderId },
-      });
+      router.replace({ pathname: '/pass', params: { orderId: payment.data.orderId || orderId } });
     } else if (
       payment.data &&
       ['FAILED', 'TIMED_OUT', 'HELD'].includes(payment.data.status)
@@ -77,25 +94,38 @@ export default function CheckoutScreen() {
           'Payment did not complete. Check Orders before retrying.'
       );
     }
-  }, [payment.data]);
+  }, [payment.data, orderId]);
+
+  const createOrder = async (): Promise<string> => {
+    const basketId = await activeBasket.get();
+    if (!basketId) throw new Error('Your basket is empty.');
+    setStatus('Creating your order…');
+    const made = await checkout.mutateAsync(basketId);
+    const id = made.order._id;
+    setOrderId(id);
+    return id;
+  };
 
   const handlePay = async () => {
     setBusy(true);
     try {
-      const basketId = await activeBasket.get();
-      if (!basketId) throw new Error('Your basket is empty.');
+      const id = orderId || (await createOrder());
 
-      setStatus('Creating your order…');
-      const made = await checkout.mutateAsync(basketId);
-
-      setStatus('Sending payment prompt…');
-      const result = await mpesa.mutateAsync({
-        orderId: made.order._id,
-        phone,
-      });
-
-      setPaymentId(result.paymentId);
-      setStatus('Check your phone and enter your M-Pesa PIN. Waiting for confirmation…');
+      if (paymentMethod === 'mpesa') {
+        setStatus('Sending payment prompt…');
+        const result = await mpesa.mutateAsync({ orderId: id, phone });
+        setPaymentId(result.paymentId);
+        setStatus('Check your phone and enter your M-Pesa PIN. Waiting for confirmation…');
+      } else {
+        if (!/^\S+@\S+\.\S+$/.test(cardEmail.trim())) {
+          throw new Error('Enter a valid email for the card receipt.');
+        }
+        setStatus('Opening secure card checkout…');
+        const result = await paymentsApi.card(id, cardEmail.trim());
+        setPaymentId(result.paymentId);
+        setStatus('Complete the payment in your browser, then return here.');
+        await Linking.openURL(result.checkoutUrl);
+      }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (e: any) {
       notify(`Checkout failed: ${e instanceof Error ? e.message : 'Please retry.'}`, 'error');
@@ -105,114 +135,189 @@ export default function CheckoutScreen() {
     }
   };
 
+  const handleQty = async (line: BasketLine, delta: number) => {
+    const basketId = await activeBasket.get();
+    if (!basketId) return;
+    try {
+      const r = await updateLineMutation.mutateAsync({
+        basketId,
+        productId: line.productId,
+        quantity: line.quantity + delta,
+      });
+      setBasket(r.basket);
+    } catch (e: any) {
+      notify(e?.message || 'Could not update item.', 'error');
+    }
+  };
+
+  const items = basket?.items || [];
+  const totalMinor = basket?.totalMinor || 0;
+  const itemCount = basket?.totalItems || items.reduce((n, i) => n + i.quantity, 0);
+
   return (
     <View style={s.page}>
-      {/* Top Header (Image 3 & 5 Right) */}
+      {/* Top Header */}
       <View style={[s.header, { paddingTop: topPadding }]}>
         <Pressable onPress={() => router.back()} style={s.backBtn}>
           <Text style={s.backIcon}>‹</Text>
           <Text style={s.backText}>Your Cart</Text>
         </Pressable>
-        <View style={s.headerRightIcons}>
-          <Text style={{ fontSize: 18, marginRight: 8 }}>🛒</Text>
-          <Text style={{ fontSize: 18 }}>🔔</Text>
-        </View>
       </View>
 
-      <ScrollView
-        contentContainerStyle={[s.content, { paddingBottom: bottomDockPadding + 70 }]}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Receipt Total Card (Image 5 Right) */}
-        <View style={s.totalCard}>
-          <Text style={s.totalSubtitle}>TOTAL AMOUNT</Text>
-          <Text style={s.totalBigAmount}>KES 2,450.00</Text>
+      {loading ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator size="large" color="#16A34A" />
+        </View>
+      ) : !basket || items.length === 0 ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 }}>
+          <Text style={{ fontSize: 40, marginBottom: 12 }}>🛒</Text>
+          <Text style={{ fontSize: 18, fontWeight: '800', color: '#0F172A' }}>Your basket is empty</Text>
+          <Text style={{ fontSize: 13, color: '#78716C', marginTop: 6, textAlign: 'center' }}>
+            Scan some items first, then come back to pay.
+          </Text>
+          <Pressable
+            style={{ marginTop: 20, backgroundColor: '#16A34A', borderRadius: 14, paddingHorizontal: 24, paddingVertical: 13 }}
+            onPress={() => router.replace('/(tabs)/scan')}
+          >
+            <Text style={{ color: '#fff', fontWeight: '800' }}>Go to Scan</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <>
+          <ScrollView
+            contentContainerStyle={[s.content, { paddingBottom: bottomDockPadding + 90 }]}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Items list */}
+            <View style={s.itemsCard}>
+              <Text style={s.itemsTitle}>{itemCount} item{itemCount === 1 ? '' : 's'}</Text>
+              {items.map((line) => (
+                <View key={line.productId} style={s.itemRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.itemName} numberOfLines={2}>{line.name}</Text>
+                    <Text style={s.itemPrice}>{formatKes(line.unitPriceMinor)} each</Text>
+                  </View>
+                  <View style={s.qtyRow}>
+                    <Pressable style={s.qtyBtn} onPress={() => handleQty(line, -1)}>
+                      <Text style={s.qtyBtnText}>−</Text>
+                    </Pressable>
+                    <Text style={s.qtyValue}>{line.quantity}</Text>
+                    <Pressable style={s.qtyBtn} onPress={() => handleQty(line, 1)}>
+                      <Text style={s.qtyBtnText}>+</Text>
+                    </Pressable>
+                  </View>
+                  <Text style={s.itemTotal}>{formatKes(line.unitPriceMinor * line.quantity)}</Text>
+                </View>
+              ))}
+            </View>
 
-          <View style={s.breakdownTable}>
-            <View style={s.breakdownRow}>
-              <Text style={s.breakdownLabel}>Products count</Text>
-              <Text style={s.breakdownValue}>4 items</Text>
+            {/* Total Card */}
+            <View style={s.totalCard}>
+              <Text style={s.totalSubtitle}>TOTAL AMOUNT</Text>
+              <Text style={s.totalBigAmount}>{formatKes(totalMinor)}</Text>
+              <View style={s.breakdownTable}>
+                <View style={s.breakdownRow}>
+                  <Text style={s.breakdownLabel}>Products</Text>
+                  <Text style={s.breakdownValue}>{itemCount} items</Text>
+                </View>
+                <View style={s.breakdownRow}>
+                  <Text style={s.breakdownLabel}>Subtotal</Text>
+                  <Text style={s.breakdownValue}>{formatKes(totalMinor)}</Text>
+                </View>
+                <View style={s.breakdownRow}>
+                  <Text style={s.breakdownLabel}>VAT</Text>
+                  <Text style={s.breakdownValue}>Included</Text>
+                </View>
+              </View>
             </View>
-            <View style={s.breakdownRow}>
-              <Text style={s.breakdownLabel}>Subtotal</Text>
-              <Text style={s.breakdownValue}>KES 2,590.00</Text>
+
+            {/* Payment Method Selector */}
+            <Text style={s.sectionLabel}>PAYMENT METHOD</Text>
+            <View style={s.methodRow}>
+              <Pressable
+                style={[s.methodCard, paymentMethod === 'mpesa' && s.methodCardSelected]}
+                onPress={() => setPaymentMethod('mpesa')}
+              >
+                <Text style={s.methodIcon}>📱</Text>
+                <Text style={s.methodName}>M-Pesa</Text>
+                <Text style={s.methodSub}>Instant STK push</Text>
+              </Pressable>
+
+              <Pressable
+                style={[s.methodCard, paymentMethod === 'card' && s.methodCardSelected]}
+                onPress={() => setPaymentMethod('card')}
+              >
+                <Text style={s.methodIcon}>💳</Text>
+                <Text style={s.methodName}>Card</Text>
+                <Text style={s.methodSub}>Visa / Mastercard</Text>
+              </Pressable>
             </View>
-            <View style={s.breakdownRow}>
-              <Text style={s.breakdownLabel}>Store discount (promos)</Text>
-              <Text style={[s.breakdownValue, { color: '#16A34A' }]}>− KES 140.00</Text>
+
+            {paymentMethod === 'mpesa' ? (
+              <>
+                <Text style={s.sectionLabel}>PAYMENT PHONE NUMBER</Text>
+                <TextInput
+                  value={phone}
+                  onChangeText={setPhone}
+                  placeholder="07XX XXX XXX or 2547..."
+                  placeholderTextColor="#94A3B8"
+                  keyboardType="phone-pad"
+                  style={s.input}
+                />
+              </>
+            ) : (
+              <>
+                <Text style={s.sectionLabel}>CARD RECEIPT EMAIL</Text>
+                <TextInput
+                  value={cardEmail}
+                  onChangeText={setCardEmail}
+                  placeholder="you@example.com"
+                  placeholderTextColor="#94A3B8"
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  style={s.input}
+                />
+                <Text style={s.cardHint}>
+                  You'll be taken to a secure payment page to enter your card details.
+                </Text>
+              </>
+            )}
+
+            {/* Status notice */}
+            <View style={s.statusNotice}>
+              <Text style={s.statusText}>
+                {payment.isFetching ? 'Verifying payment…' : status}
+              </Text>
             </View>
-            <View style={s.breakdownRow}>
-              <Text style={s.breakdownLabel}>TAX (VAT 16% incl.)</Text>
-              <Text style={s.breakdownValue}>KES 337.93</Text>
+
+            <View style={s.securityBadge}>
+              <Text style={{ fontSize: 18 }}>🛡</Text>
+              <Text style={s.securityText}>
+                After payment, an encrypted QR Exit Pass is generated immediately for store exit gate scanning.
+              </Text>
             </View>
+          </ScrollView>
+
+          {/* Sticky Bottom Pay Button */}
+          <View style={[s.bottomDock, { paddingBottom: bottomDockPadding }]}>
+            <Pressable
+              style={[s.payButton, (busy || !!paymentId) && s.payButtonDisabled]}
+              onPress={handlePay}
+              disabled={busy || !!paymentId}
+            >
+              <Text style={s.payButtonText}>
+                {busy
+                  ? 'Processing payment…'
+                  : paymentId && paymentMethod === 'mpesa'
+                  ? 'Waiting for M-Pesa PIN…'
+                  : paymentId
+                  ? 'Complete card payment in browser…'
+                  : `Pay ${formatKes(totalMinor)} →`}
+              </Text>
+            </Pressable>
           </View>
-        </View>
-
-        {/* Payment Method Selector */}
-        <Text style={s.sectionLabel}>PAYMENT METHOD</Text>
-        <View style={s.methodRow}>
-          <Pressable
-            style={[s.methodCard, paymentMethod === 'mpesa' && s.methodCardSelected]}
-            onPress={() => setPaymentMethod('mpesa')}
-          >
-            <Text style={s.methodIcon}>📱</Text>
-            <Text style={s.methodName}>M-Pesa</Text>
-            <Text style={s.methodSub}>Instant STK push</Text>
-          </Pressable>
-
-          <Pressable
-            style={[s.methodCard, paymentMethod === 'card' && s.methodCardSelected]}
-            onPress={() => setPaymentMethod('card')}
-          >
-            <Text style={s.methodIcon}>💳</Text>
-            <Text style={s.methodName}>Card / Visa</Text>
-            <Text style={s.methodSub}>Debit / Credit</Text>
-          </Pressable>
-        </View>
-
-        {/* M-Pesa Phone Input */}
-        <Text style={s.sectionLabel}>PAYMENT PHONE NUMBER</Text>
-        <TextInput
-          value={phone}
-          onChangeText={setPhone}
-          placeholder="07XX XXX XXX or 2547..."
-          placeholderTextColor="#94A3B8"
-          keyboardType="phone-pad"
-          style={s.input}
-        />
-
-        {/* Status notice */}
-        <View style={s.statusNotice}>
-          <Text style={s.statusText}>
-            {payment.isFetching ? 'Verifying payment from Safaricom M-Pesa…' : status}
-          </Text>
-        </View>
-
-        {/* Security / Exit Pass info */}
-        <View style={s.securityBadge}>
-          <Text style={{ fontSize: 18 }}>🛡</Text>
-          <Text style={s.securityText}>
-            After payment, an encrypted QR Exit Pass is generated immediately for store exit gate scanning.
-          </Text>
-        </View>
-      </ScrollView>
-
-      {/* Sticky Bottom Pay Button (Image 5 Right & Image 3) */}
-      <View style={[s.bottomDock, { paddingBottom: bottomDockPadding }]}>
-        <Pressable
-          style={[s.payButton, (busy || !!paymentId) && s.payButtonDisabled]}
-          onPress={handlePay}
-          disabled={busy || !!paymentId}
-        >
-          <Text style={s.payButtonText}>
-            {busy
-              ? 'Processing payment…'
-              : paymentId
-              ? 'Waiting for M-Pesa PIN…'
-              : 'Pay & Generate Exit Pass →'}
-          </Text>
-        </Pressable>
-      </View>
+        </>
+      )}
     </View>
   );
 }
@@ -220,7 +325,7 @@ export default function CheckoutScreen() {
 const s = StyleSheet.create({
   page: {
     flex: 1,
-    backgroundColor: '#FAF8F5', // Warm cream background matching Image 3
+    backgroundColor: '#FAF8F5',
   },
   header: {
     backgroundColor: '#FAF8F5',
@@ -248,14 +353,48 @@ const s = StyleSheet.create({
     fontWeight: '800',
     color: '#0F172A',
   },
-  headerRightIcons: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
   content: {
     padding: 20,
     paddingBottom: 110,
   },
+  itemsCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E7E4DC',
+    marginBottom: 16,
+  },
+  itemsTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#78716C',
+    letterSpacing: 0.6,
+    marginBottom: 10,
+    textTransform: 'uppercase',
+  },
+  itemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F0EB',
+    gap: 10,
+  },
+  itemName: { fontSize: 14, fontWeight: '600', color: '#1F2937' },
+  itemPrice: { fontSize: 12, color: '#78716C', marginTop: 2 },
+  qtyRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  qtyBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    backgroundColor: '#F1F5F1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  qtyBtnText: { fontSize: 17, fontWeight: '800', color: '#15803D' },
+  qtyValue: { fontSize: 14, fontWeight: '800', color: '#0F172A', minWidth: 18, textAlign: 'center' },
+  itemTotal: { fontSize: 14, fontWeight: '800', color: '#0F172A', minWidth: 70, textAlign: 'right' },
   totalCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 22,
@@ -353,6 +492,13 @@ const s = StyleSheet.create({
     borderColor: '#E7E4DC',
     color: '#0F172A',
     marginBottom: 16,
+  },
+  cardHint: {
+    fontSize: 12,
+    color: '#78716C',
+    marginTop: -8,
+    marginBottom: 12,
+    lineHeight: 17,
   },
   statusNotice: {
     backgroundColor: '#F0FDF4',

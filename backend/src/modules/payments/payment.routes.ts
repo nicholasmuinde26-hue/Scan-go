@@ -17,6 +17,7 @@ import { broadcastEvent } from '../../shared/utils/eventStream.js';
 import { rejectIfSubscriptionBlocked } from '../../middleware/subscriptionGate.js';
 import { amountDueMinor, paymentKindFor } from '../../shared/utils/clickCollect.js';
 import { createFlutterwaveCheckout, isFlutterwavePaymentValid, verifyFlutterwaveWebhookSignature, verifyFlutterwaveTransaction } from './flutterwave.service.js';
+import { mirrorOrder, mirrorPayment } from '../financial/financial-ledger.service.js';
 
 const router = Router();
 
@@ -343,7 +344,7 @@ if (ENV.NODE_ENV !== 'production' && ENV.ENABLE_PAYMENT_SIMULATION) router.post(
     const mpesaReceiptNumber = `QHK${Date.now().toString().slice(-6)}`;
 
     // Create payment record
-    await Payment.create({
+    const payment = await Payment.create({
       orderId: order._id,
       storeId: order.storeId,
       customerId: order.customerId,
@@ -445,6 +446,9 @@ if (ENV.NODE_ENV !== 'production' && ENV.ENABLE_PAYMENT_SIMULATION) router.post(
       storeId: order.storeId.toString(),
       targetUserId: order.customerId.toString(),
     });
+
+    void mirrorPayment(payment, order);
+    void mirrorOrder(order);
 
     res.json({
       success: true,

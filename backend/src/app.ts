@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
+import path from 'node:path';
+import fs from 'node:fs';
 import authRoutes from './modules/auth/auth.routes.js';
 import inviteRoutes from './modules/invitations/invite.routes.js';
 import onboardingRoutes from './modules/onboarding/onboarding.routes.js';
@@ -29,6 +31,11 @@ import subscriptionRoutes from './modules/subscriptions/subscription.routes.js';
 import structureRoutes from './modules/organizations/structure.routes.js';
 import billingRoutes from './modules/billing/billing.routes.js';
 import presenceRoutes from './modules/presence/presence.routes.js';
+import deviceRoutes from './modules/devices/device.routes.js';
+import guestRoutes from './modules/guest/guest.routes.js';
+import posRoutes from './modules/pos/pos.routes.js';
+import analyticsRoutes from './modules/analytics/analytics.routes.js';
+import financialRoutes from './modules/financial/financial.routes.js';
 import { handleSseConnection } from './shared/utils/eventStream.js';
 import { ENV } from './config/environment.js';
 import { generalApiLimiter, authRateLimiter, qrRedemptionLimiter, presenceLimiter } from './middleware/rateLimiter.js';
@@ -66,6 +73,8 @@ export function createApp() {
     })
   );
 
+  // Barcode-from-image uploads (mobile "scan from photo") carry full JPEGs — larger limit, this path only.
+  app.use('/api/v1/products/decode-image', express.json({ limit: '8mb' }));
   // 700kb: product photos arrive as compressed (~60-150kb) data URLs; everything else is far smaller.
   app.use(express.json({ limit: '700kb' }));
   app.use(cookieParser());
@@ -85,6 +94,24 @@ export function createApp() {
   // Real-Time Event Stream (Server-Sent Events for live multi-portal sync)
   app.get('/api/v1/events/stream', handleSseConnection);
 
+  // Public mobile-app download — serves the built APK placed in
+  // backend/downloads/scan-go.apk so the website's "Get the app" button can
+  // hand phones the real app instead of the PWA.
+  app.get('/api/v1/app/download', (_req, res) => {
+    const apkPath = path.resolve(process.cwd(), 'downloads', 'scan-go.apk');
+    if (!fs.existsSync(apkPath)) {
+      res.status(404).json({
+        success: false,
+        error: 'APP_NOT_AVAILABLE',
+        message: 'The mobile app package has not been published yet.',
+      });
+      return;
+    }
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader('Content-Disposition', 'attachment; filename="scan-go.apk"');
+    fs.createReadStream(apkPath).pipe(res);
+  });
+
   // Mount API modules with specific security rate limiters
   app.use('/api/v1/auth/login', authRateLimiter);
   app.use('/api/v1/auth/register', authRateLimiter);
@@ -100,6 +127,11 @@ export function createApp() {
   app.use('/api/v1/products', productRoutes);
   app.use('/api/v1/presence', presenceRoutes);
   app.use('/api/v1/baskets', basketRoutes);
+  app.use('/api/v1/devices', deviceRoutes);
+  app.use('/api/v1/guest', guestRoutes);
+  app.use('/api/v1/pos', posRoutes);
+  app.use('/api/v1/analytics', analyticsRoutes);
+  app.use('/api/v1/financial', financialRoutes);
   app.use('/api/v1/orders', orderRoutes);
   app.use('/api/v1/payments', paymentRoutes);
   app.use('/api/v1/picking', pickingRoutes);

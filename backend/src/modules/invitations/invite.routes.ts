@@ -1,14 +1,16 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
+import { resolveTargetScope } from '../../utils/scopeResolver.js';
 import crypto from 'crypto';
 import Invite from './invite.model.js';
 import User from '../users/user.model.js';
 import Organization from '../organizations/organization.model.js';
 import Store from '../stores/store.model.js';
 import AuditLog from '../audits/audit.model.js';
-import { authenticate, authorize, AuthRequest, canonicalRole, canAccessStore } from '../../middleware/auth.js';
+import { authenticate, AuthRequest, canonicalRole, canAccessStore, requirePermission } from '../../middleware/auth.js';
 import { validatePasswordStrength } from '../../shared/utils/passwordPolicy.js';
 import bcrypt from 'bcryptjs';
 import { rejectIfSubscriptionBlocked } from '../../middleware/subscriptionGate.js';
+import { phoneVariants } from '../../shared/utils/phone.js';
 
 const router = Router();
 
@@ -47,6 +49,21 @@ const INVITABLE_BY: Record<string, string[]> = {
 // Hash token helper
 function hashInviteToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// Resolves the target org/store for an invitation and attaches it to the request.
+// Scope violations (cross-branch, outside region) become 4xx responses, not 500s.
+function withInviteScope(
+  resolve: (req: AuthRequest) => Promise<{ organizationId: string; storeId?: string }>,
+) {
+  return async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      (req as any).resolvedScope = await resolve(req);
+      next();
+    } catch (error: any) {
+      res.status(error?.status || 500).json({ success: false, error: error?.message || 'Could not resolve invitation scope.' });
+    }
+  };
 }
 
 // 1. Create an invite (Platform super-admin or Org admin or Branch manager)
@@ -385,5 +402,252 @@ router.post('/accept/:token', async (req: Request, res: Response) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// 4. Lookup user by phone (Checks if user is already registered in the system)
+router.get('/lookup-phone', authenticate, requirePermission('staff:read'), async (req: AuthRequest, res: Response) => {
+  try {
+    const rawPhone = String(req.query.phone || '').trim();
+    if (!rawPhone || rawPhone.length < 4) {
+      res.json({ success: true, exists: false });
+      return;
+    }
+    const variants = phoneVariants(rawPhone);
+    const user = await User.findOne({ phone: { $in: variants } })
+      .select('_id name phone email role storeId organizationId status active createdAt')
+      .populate('storeId', 'name code');
+
+    if (!user) {
+      res.json({ success: true, exists: false });
+      return;
+    }
+
+    res.json({
+      success: true,
+      exists: true,
+      user: {
+        id: user._id,
+        name: user.name,
+        phone: user.phone,
+        email: user.email,
+        role: user.role,
+        store: user.storeId,
+        organizationId: user.organizationId,
+        status: user.status,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 5. Promote an existing user directly to a staff role (No email required)
+router.post('/promote-user', authenticate, requirePermission('staff:manage'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { phone, role, storeId, managedStoreIds } = req.body;
+    if (!phone || !role) {
+      res.status(400).json({ success: false, error: 'Phone number and target role are required.' });
+      return;
+    }
+
+    const inviterRole = canonicalRole(req.user!.role) as string;
+    const allowedRoles = INVITABLE_BY[inviterRole];
+    if (!allowedRoles || !allowedRoles.includes(role)) {
+      res.status(403).json({ success: false, error: 'You are not allowed to assign users to that role.' });
+      return;
+    }
+
+    const variants = phoneVariants(phone);
+    const user = await User.findOne({ phone: { $in: variants } });
+    if (!user) {
+      res.status(404).json({ success: false, error: 'No user found with that phone number.' });
+      return;
+    }
+
+    // Determine target tenant
+    const isPlatformInviter = ['PLATFORM_OWNER', 'PLATFORM_ADMIN'].includes(inviterRole);
+    let targetOrgId: string | undefined = req.user?.organizationId ? String(req.user.organizationId) : undefined;
+    let targetStoreId: string | undefined = storeId ? String(storeId) : (req.user?.storeId ? String(req.user.storeId) : undefined);
+
+    if (isPlatformInviter) {
+      targetOrgId = req.body.organizationId ? String(req.body.organizationId) : undefined;
+    }
+
+    if (!targetOrgId && targetStoreId) {
+      const st = await Store.findById(targetStoreId).select('organizationId');
+      targetOrgId = st?.organizationId?.toString();
+    }
+
+    if (!targetOrgId) {
+      res.status(400).json({ success: false, error: 'Target supermarket organization could not be resolved.' });
+      return;
+    }
+
+    if (await rejectIfSubscriptionBlocked(res, String(targetOrgId), 'invite_staff')) return;
+
+    const isBranchRole = BRANCH_STAFF_ROLES.includes(role);
+    const isRegionRole = role === 'REGION_MANAGER';
+    const isBranchManager = role === 'BRANCH_MANAGER';
+
+    const requestedManagedStoreIds: string[] = Array.isArray(managedStoreIds) ? managedStoreIds.map(String).filter(Boolean) : [];
+
+    if (isBranchRole || isBranchManager) {
+      if (!targetStoreId) {
+        res.status(400).json({ success: false, error: 'Please choose a branch for this staff role.' });
+        return;
+      }
+      user.storeId = targetStoreId as any;
+    } else {
+      user.storeId = undefined;
+    }
+
+    if (isRegionRole) {
+      if (requestedManagedStoreIds.length === 0) {
+        res.status(400).json({ success: false, error: 'Select at least one branch for this region manager.' });
+        return;
+      }
+      user.managedStoreIds = requestedManagedStoreIds as any;
+      user.storeId = undefined;
+    } else if (requestedManagedStoreIds.length > 0) {
+      user.managedStoreIds = requestedManagedStoreIds as any;
+    }
+
+    const previousRole = user.role;
+    user.role = role;
+    user.organizationId = targetOrgId as any;
+    user.status = 'ACTIVE';
+    user.active = true;
+    await user.save();
+
+    if (isBranchManager && targetStoreId) {
+      await Store.updateOne({ _id: targetStoreId }, { $set: { managerId: user._id } });
+    }
+
+    await AuditLog.create({
+      actorId: req.user?.id,
+      actorRole: req.user?.role,
+      actorName: req.user?.name,
+      action: 'PROMOTE_USER_TO_STAFF',
+      entityType: 'USER',
+      entityId: user._id.toString(),
+      storeId: targetStoreId,
+      oldValue: { role: previousRole },
+      newValue: { role: user.role, organizationId: targetOrgId, storeId: targetStoreId },
+      reason: `Direct promotion of ${user.name} (${user.phone}) from ${previousRole} to ${role}`,
+    });
+
+    res.json({
+      success: true,
+      message: `${user.name} has been promoted to ${role} successfully. They can now log in at /staff using their phone number and existing password.`,
+      user: {
+        id: user._id,
+        name: user.name,
+        phone: user.phone,
+        role: user.role,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 6. Direct staff creation without email invite link
+router.post('/create-direct', authenticate, requirePermission('staff:manage'), withInviteScope(async (req: AuthRequest) => {
+  const { role, storeId, managedStoreIds } = req.body;
+  // Resolve organization and branch based on inviter's role and payload
+  return await resolveTargetScope(req, role, { storeId, managedStoreIds });
+}), async (req: AuthRequest, res: Response) => {
+  try {
+    const { name, phone, email, role, password } = req.body;
+    if (!name || !phone || !role) {
+      res.status(400).json({ success: false, error: 'Full name, phone number, and role are required.' });
+      return;
+    }
+
+    const inviterRole = canonicalRole(req.user!.role) as string;
+    const allowedRoles = INVITABLE_BY[inviterRole];
+    if (!allowedRoles || !allowedRoles.includes(role)) {
+      res.status(403).json({ success: false, error: 'You are not allowed to assign users to that role.' });
+      return;
+    }
+
+    const variants = phoneVariants(phone);
+    const existing = await User.findOne({ phone: { $in: variants } });
+    if (existing) {
+      res.status(409).json({
+        success: false,
+        error: `A user with phone ${phone} already exists (${existing.name}, ${existing.role}). You can promote them directly instead.`,
+      });
+      return;
+    }
+
+    // Resolved scope from authorize middleware
+    const { organizationId: targetOrgId, storeId: targetStoreId } = (req as any).resolvedScope;
+
+    if (!targetOrgId) {
+      res.status(400).json({ success: false, error: 'Target supermarket organization could not be resolved.' });
+      return;
+    }
+
+    if (await rejectIfSubscriptionBlocked(res, String(targetOrgId), 'invite_staff')) return;
+
+    const isBranchRole = BRANCH_STAFF_ROLES.includes(role);
+    const isRegionRole = role === 'REGION_MANAGER';
+    const isBranchManager = role === 'BRANCH_MANAGER';
+    const requestedManagedStoreIds: string[] = Array.isArray(req.body.managedStoreIds) ? req.body.managedStoreIds.map(String).filter(Boolean) : [];
+
+    if ((isBranchRole || isBranchManager) && !targetStoreId) {
+      res.status(400).json({ success: false, error: 'Please choose a branch for this staff role.' });
+      return;
+    }
+
+    const userPassword = String(password || '').trim() || 'password123';
+    const passwordHash = await bcrypt.hash(userPassword, 10);
+
+    const newUser = await User.create({
+      name: String(name).trim(),
+      phone: String(phone).trim(),
+      email: email ? String(email).trim() : undefined,
+      passwordHash,
+      role,
+      organizationId: targetOrgId as any,
+      storeId: (isBranchRole || isBranchManager) ? (targetStoreId as any) : undefined,
+      managedStoreIds: requestedManagedStoreIds.length ? (requestedManagedStoreIds as any) : undefined,
+      status: 'ACTIVE',
+      active: true,
+      mustChangePassword: false,
+    });
+
+    if (isBranchManager && targetStoreId) {
+      await Store.updateOne({ _id: targetStoreId }, { $set: { managerId: newUser._id } });
+    }
+
+    await AuditLog.create({
+      actorId: req.user?.id,
+      actorRole: req.user?.role,
+      actorName: req.user?.name,
+      action: 'CREATE_STAFF_DIRECT',
+      entityType: 'USER',
+      entityId: newUser._id.toString(),
+      storeId: targetStoreId,
+      newValue: { role: newUser.role, organizationId: targetOrgId, storeId: targetStoreId },
+      reason: `Direct staff account creation for ${newUser.name} (${newUser.phone}) as ${role}`,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `Staff member ${newUser.name} created successfully.`,
+      tempPassword: userPassword,
+      user: {
+        id: newUser._id,
+        name: newUser.name,
+        phone: newUser.phone,
+        role: newUser.role,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
 export default router;

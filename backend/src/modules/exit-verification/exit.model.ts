@@ -39,6 +39,7 @@ export interface IExitEvent extends Document {
   clearedAt?: Date;
   amberOvertimeAlert?: boolean;
   amberDurationSeconds?: number;
+  aiAssessment?: Record<string, any>;
   notes?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -109,6 +110,7 @@ const exitEventSchema = new Schema<IExitEvent>(
     clearedAt: Date,
     amberOvertimeAlert: { type: Boolean, default: false },
     amberDurationSeconds: Number,
+    aiAssessment: { type: Schema.Types.Mixed },
     notes: String,
   },
   { timestamps: true }

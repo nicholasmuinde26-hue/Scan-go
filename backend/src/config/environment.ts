@@ -110,6 +110,20 @@ export const ENV = {
   AT_USERNAME: process.env.AT_USERNAME || '',
   AT_API_KEY: process.env.AT_API_KEY || '',
   AT_SENDER_ID: process.env.AT_SENDER_ID || '',
+  // AI exit-verification sidecar (Python FastAPI). Empty = disabled; exits then
+  // run on the in-process risk engine only.
+  AI_SERVICE_URL: process.env.AI_SERVICE_URL || '',
+  AI_SERVICE_TIMEOUT_MS: parseInt(process.env.AI_SERVICE_TIMEOUT_MS || '2500', 10),
+  AI_SERVICE_API_KEY: process.env.AI_SERVICE_API_KEY || '',
+  // MQTT transport for registered devices (smart baskets, exit cameras, kiosks).
+  // Empty = disabled; devices then use HTTPS POST /api/v1/devices/events only.
+  MQTT_URL: process.env.MQTT_URL || '',
+  MQTT_USERNAME: process.env.MQTT_USERNAME || '',
+  MQTT_PASSWORD: process.env.MQTT_PASSWORD || '',
+  // PostgreSQL financial ledger. Empty = disabled; MongoDB remains the sole
+  // authoritative store and nothing is mirrored. Set to enable dual-write of
+  // orders/payments into the relational ledger.
+  POSTGRES_URL: process.env.POSTGRES_URL || process.env.DATABASE_URL || '',
   // CORS configuration
   ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || '',
 };

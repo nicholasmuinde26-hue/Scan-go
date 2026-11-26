@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import { router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import { useLogout, useLogoutAll } from '../../auth';
 import { useProfile } from '../hooks';
 import { tokens } from '../../../core/session/tokens';
@@ -20,7 +20,6 @@ import { notify as notifyMsg, confirmDialog } from '../../../shared/ui/feedback'
 import { useI18n } from '../../../core/i18n';
 
 export default function AccountScreen() {
-  const insets = useSafeAreaInsets();
   const profile = useProfile();
   const signOut = useLogout();
   const signOutEverywhere = useLogoutAll();
@@ -30,8 +29,8 @@ export default function AccountScreen() {
   const { locale, setLocale, t } = useI18n();
   const isGoogle = !!(user as any)?.googleId || !!user?.email?.includes('@');
 
-  const topPadding = Math.max(insets.top, 24) + 12;
-  const bottomPadding = Math.max(insets.bottom, 20) + 80;
+  const topPadding = useTopInset(12);
+  const bottomPadding = useBottomInset(80);
 
   const logout = async () => {
     const ok = await confirmDialog('Sign out', 'Sign out of this device?', 'Sign out', true);
@@ -144,6 +143,12 @@ export default function AccountScreen() {
         icon="🔒"
         title="Privacy & Data Protection"
         detail="Compliant with Kenya Data Protection Act (DPA)"
+      />
+      <Item
+        icon="📄"
+        title="Request my data or account deletion"
+        detail="Opens a help request handled by our support team"
+        onPress={() => router.push('/support')}
       />
 
       <Pressable style={s.notifyBtn} onPress={notify}>

@@ -14,36 +14,42 @@ import {
   View,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import * as Haptics from 'expo-haptics';
 import { useProducts } from '../hooks';
+import { catalogApi } from '../api';
+import type { ProductSort } from '../types';
+import { guestStore } from '../../guest/store';
 import { useCollectCart } from '../../cart/store';
 import { currentStore } from '../../stores/store';
 import { ProductVisual } from '../components/ProductVisual';
 import type { Store } from '../../stores';
 import type { Product } from '../types';
 import { notify, ProductCardSkeleton } from '../../../shared/ui/feedback';
+import { formatKes } from '../../../shared/money';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 export default function ShopScreen() {
-  const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ category?: string }>();
   const [store, setStore] = useState<Store | null>(null);
   const [query, setQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
+  const [sort, setSort] = useState<ProductSort>('recommended');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [detailQuantity, setDetailQuantity] = useState(1);
   const [isFavorite, setIsFavorite] = useState(false);
   const [activeSection, setActiveSection] = useState<'detail' | 'nutrition' | 'review'>('detail');
+  const [isGuest, setIsGuest] = useState(false);
 
-  const topPadding = Math.max(insets.top, 24) + 10;
-  const bottomPadding = Math.max(insets.bottom, 16) + 70;
+  const topPadding = useTopInset(10);
+  const bottomPadding = useBottomInset(80);
 
   const cartLines = useCollectCart((state) => state.lines);
   const addLine = useCollectCart((state) => state.add);
 
   useEffect(() => {
+    guestStore.isGuest().then(setIsGuest);
     currentStore.get().then((st) => {
       setStore(st);
       if (st) useCollectCart.getState().setStoreId(st._id);
@@ -77,7 +83,17 @@ export default function ShopScreen() {
       .filter((c): c is string => Boolean(c && c.trim()))
   ))];
 
+  const categoryCounts = rawProducts.reduce<Record<string, number>>((acc, p) => {
+    const c = p.category || 'Other';
+    acc[c] = (acc[c] || 0) + 1;
+    return acc;
+  }, {});
+
   const handleAdd = (item: Product, qty: number = 1) => {
+    if (isGuest) {
+      notify('Guest mode: use the Scan tab to scan items in-store, or sign in for click & collect.', 'info');
+      return;
+    }
     addLine(
       {
         productId: item._id,
@@ -96,11 +112,40 @@ export default function ShopScreen() {
     setDetailQuantity(1);
   };
 
-  const filteredProducts = rawProducts.filter((p) => {
-    if (selectedCategory === 'All') return true;
-    if (p.category && p.category.toLowerCase() === selectedCategory.toLowerCase()) return true;
-    return true;
-  });
+  // Deals: products with a compare-at price above the selling price
+  const dealProducts = rawProducts
+    .filter((p) => (p.stock ?? 1) > 0 && p.compareAtPriceMinor && p.compareAtPriceMinor > p.priceMinor)
+    .sort((a, b) => ((b.compareAtPriceMinor || 0) - b.priceMinor) - ((a.compareAtPriceMinor || 0) - a.priceMinor));
+
+  // Top sellers by real 30-day sales returned from the API
+  const topSellers = rawProducts
+    .filter((p) => (p.stock ?? 1) > 0 && (p.unitsSold30d || 0) > 0)
+    .sort((a, b) => (b.unitsSold30d || 0) - (a.unitsSold30d || 0))
+    .slice(0, 10);
+
+  const filteredProducts = rawProducts
+    .filter((p) => {
+      if (selectedCategory !== 'All' && p.category?.toLowerCase() !== selectedCategory.toLowerCase()) return false;
+      if (!query) return true;
+      const q = query.toLowerCase();
+      return (
+        p.name.toLowerCase().includes(q) ||
+        (p.category || '').toLowerCase().includes(q) ||
+        (p.barcode || '').includes(query)
+      );
+    })
+    .sort((a, b) => {
+      if (sort === 'price-low') return a.priceMinor - b.priceMinor;
+      if (sort === 'price-high') return b.priceMinor - a.priceMinor;
+      if (sort === 'name') return a.name.localeCompare(b.name);
+      return 0;
+    });
+
+  const productImage = (p: Product) => p.image || catalogApi.imageUrl(p._id);
+  const discountPct = (p: Product) =>
+    p.compareAtPriceMinor && p.compareAtPriceMinor > p.priceMinor
+      ? Math.round((1 - p.priceMinor / p.compareAtPriceMinor) * 100)
+      : 0;
 
   return (
     <View style={s.page}>
@@ -111,17 +156,19 @@ export default function ShopScreen() {
             <Text style={s.headerTitle}>Find Products</Text>
             <Text style={s.headerSub}>{store?.name || 'All Store Catalog'}</Text>
           </View>
-          <Pressable
-            style={s.cartBtn}
-            onPress={() => router.push('/collect-checkout')}
-          >
-            <Text style={{ fontSize: 18 }}>🛒</Text>
-            {cartUnits > 0 && (
-              <View style={s.cartBadge}>
-                <Text style={s.cartBadgeText}>{cartUnits}</Text>
-              </View>
-            )}
-          </Pressable>
+          {!isGuest && (
+            <Pressable
+              style={s.cartBtn}
+              onPress={() => router.push('/collect-checkout')}
+            >
+              <Text style={{ fontSize: 18 }}>🛒</Text>
+              {cartUnits > 0 && (
+                <View style={s.cartBadge}>
+                  <Text style={s.cartBadgeText}>{cartUnits}</Text>
+                </View>
+              )}
+            </Pressable>
+          )}
         </View>
 
         {/* Search Bar */}
@@ -153,14 +200,14 @@ export default function ShopScreen() {
               style={[s.catPill, selectedCategory.toLowerCase() === cat.toLowerCase() && s.catPillActive]}
               onPress={() => setSelectedCategory(cat)}
             >
-              <Text
-                style={[
-                  s.catText,
-                  selectedCategory.toLowerCase() === cat.toLowerCase() && s.catTextActive,
-                ]}
-              >
+              <Text style={[s.catText, selectedCategory.toLowerCase() === cat.toLowerCase() && s.catTextActive]}>
                 {cat}
               </Text>
+              <View style={[s.catCount, selectedCategory.toLowerCase() === cat.toLowerCase() && s.catCountActive]}>
+                <Text style={[s.catCountText, selectedCategory.toLowerCase() === cat.toLowerCase() && s.catCountTextActive]}>
+                  {cat === 'All' ? rawProducts.length : categoryCounts[cat] || 0}
+                </Text>
+              </View>
             </Pressable>
           ))}
         </ScrollView>
@@ -179,9 +226,93 @@ export default function ShopScreen() {
         <FlatList
           data={filteredProducts}
           keyExtractor={(p) => p._id}
-          numColumns={2}
+          numColumns={3}
           contentContainerStyle={[s.grid, { paddingBottom: bottomPadding + 40 }]}
           columnWrapperStyle={s.gridRow}
+          ListHeaderComponent={
+            <View>
+              {/* Hero banner — parity with the web shop hero */}
+              {selectedCategory === 'All' && !query && (
+                <View style={s.heroCard}>
+                  <Text style={s.heroBadge}>🏪 {store?.name || 'Our store'}</Text>
+                  <Text style={s.heroTitle}>Your everyday shop, made easy.</Text>
+                  <Text style={s.heroSub}>
+                    Browse this branch's live catalogue, find good offers, and choose what you need.
+                  </Text>
+                  {store?.location?.address || store?.location?.city ? (
+                    <View style={s.heroStoreChip}>
+                      <Text style={s.heroStoreChipText}>
+                        📍 {[store.location.address, store.location.city].filter(Boolean).join(', ')}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              )}
+
+              {/* Sort row */}
+              <View style={s.sortRow}>
+                {(['recommended', 'price-low', 'price-high', 'name'] as ProductSort[]).map((opt) => (
+                  <Pressable
+                    key={opt}
+                    style={[s.sortPill, sort === opt && s.sortPillActive]}
+                    onPress={() => setSort(opt)}
+                  >
+                    <Text style={[s.sortText, sort === opt && s.sortTextActive]}>
+                      {opt === 'price-low' ? 'Price ↑' : opt === 'price-high' ? 'Price ↓' : opt === 'name' ? 'A–Z' : 'For you'}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              {/* Deals rail — "Offers at this branch" */}
+              {selectedCategory === 'All' && !query && dealProducts.length > 0 && (
+                <View style={s.railCard}>
+                  <Text style={s.railKicker}>🏷️ Offers & savings</Text>
+                  <Text style={s.railTitle}>Offers at this branch</Text>
+                  <Text style={s.railSub}>Current prices and savings set by {store?.name || 'this store'}.</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 8 }}>
+                    {dealProducts.slice(0, 8).map((p) => (
+                      <Pressable key={p._id} style={s.dealCard} onPress={() => openProductDetail(p)}>
+                        <View style={s.dealBadge}>
+                          <Text style={s.dealBadgeText}>-{discountPct(p)}%</Text>
+                        </View>
+                        <ProductVisual image={productImage(p)} name={p.name} category={p.category} size={72} emojiSize={30} borderRadius={12} />
+                        <Text style={s.dealName} numberOfLines={2}>{p.name}</Text>
+                        <Text style={s.dealPrice}>{formatKes(p.priceMinor)}</Text>
+                        <Text style={s.dealWas}>{formatKes(p.compareAtPriceMinor || 0)}</Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+
+              {/* Top sellers rail — "Fast movers" */}
+              {selectedCategory === 'All' && !query && topSellers.length > 0 && (
+                <View style={[s.railCard, s.railCardAmber]}>
+                  <Text style={s.railKickerAmber}>🔥 Popular with shoppers</Text>
+                  <Text style={s.railTitle}>Fast movers</Text>
+                  <Text style={s.railSub}>Based on items purchased here over the last 30 days.</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 8 }}>
+                    {topSellers.map((p) => (
+                      <Pressable key={p._id} style={s.topCard} onPress={() => openProductDetail(p)}>
+                        <ProductVisual image={productImage(p)} name={p.name} category={p.category} size={72} emojiSize={30} borderRadius={12} />
+                        <Text style={s.topName} numberOfLines={2}>{p.name}</Text>
+                        <Text style={s.topMeta}>{p.unitsSold30d} sold · {formatKes(p.priceMinor)}</Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+
+              {/* Catalogue heading + count */}
+              <View style={s.catalogueHead}>
+                <Text style={s.catalogueTitle}>
+                  {selectedCategory === 'All' ? 'All products' : `${selectedCategory}`}
+                </Text>
+                <Text style={s.catalogueCount}>{filteredProducts.length} {filteredProducts.length === 1 ? 'product' : 'products'}</Text>
+              </View>
+            </View>
+          }
           ListEmptyComponent={
             <View style={s.empty}>
               <Text style={{ fontSize: 40, marginBottom: 8 }}>🧺</Text>
@@ -199,23 +330,32 @@ export default function ShopScreen() {
               onPress={() => openProductDetail(item)}
             >
               <View style={s.cardThumb}>
+                {discountPct(item) > 0 && (
+                  <View style={s.cardDealBadge}>
+                    <Text style={s.cardDealBadgeText}>-{discountPct(item)}%</Text>
+                  </View>
+                )}
                 <ProductVisual
-                  image={item.image}
+                  image={productImage(item)}
                   name={item.name}
                   category={item.category}
-                  size={100}
-                  emojiSize={42}
-                  borderRadius={14}
+                  size={72}
+                  emojiSize={30}
+                  borderRadius={12}
                 />
               </View>
               <Text style={s.cardName} numberOfLines={2}>
                 {item.name}
               </Text>
-              <Text style={s.cardCategory}>{item.category || 'Grocery'}</Text>
               <View style={s.cardBottom}>
-                <Text style={s.cardPrice}>
-                  KES {((item.priceMinor / 100)).toFixed(2)}
-                </Text>
+                <View style={{ flex: 1 }}>
+                  {discountPct(item) > 0 && (
+                    <Text style={s.cardWas}>{formatKes(item.compareAtPriceMinor || 0)}</Text>
+                  )}
+                  <Text style={s.cardPrice} numberOfLines={1}>
+                    {formatKes(item.priceMinor)}
+                  </Text>
+                </View>
                 <Pressable
                   style={s.addBtn}
                   onPress={(e) => {
@@ -229,28 +369,6 @@ export default function ShopScreen() {
             </Pressable>
           )}
         />
-      )}
-
-      {/* Review Floating Bottom Bar */}
-      {cartUnits > 0 && (
-        <View style={[s.bottomFloating, { bottom: Math.max(insets.bottom, 16) + 70 }]}>
-          <Pressable
-            style={s.bottomBtn}
-            onPress={() => {
-              if (!store) {
-                notify(`Select Store: Choose a store from Home first.`, 'info');
-                return;
-              }
-              router.push('/collect-checkout');
-            }}
-          >
-            <View style={s.bottomBtnLeft}>
-              <Text style={s.bottomCartIcon}>🛒</Text>
-              <Text style={s.bottomBtnCount}>{cartUnits} items in cart</Text>
-            </View>
-            <Text style={s.bottomBtnAction}>Review Cart →</Text>
-          </Pressable>
-        </View>
       )}
 
       {/* Product Detail Modal */}
@@ -465,8 +583,11 @@ const s = StyleSheet.create({
     paddingVertical: 4,
   },
   catPill: {
-    paddingHorizontal: 14,
-    paddingVertical: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 12,
     backgroundColor: '#F8FAFC',
     borderWidth: 1,
@@ -482,6 +603,23 @@ const s = StyleSheet.create({
     color: '#64748B',
   },
   catTextActive: {
+    color: '#FFFFFF',
+  },
+  catCount: {
+    backgroundColor: '#E2E8F0',
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  catCountActive: {
+    backgroundColor: 'rgba(255,255,255,0.25)',
+  },
+  catCountText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748B',
+  },
+  catCountTextActive: {
     color: '#FFFFFF',
   },
   center: {
@@ -501,35 +639,37 @@ const s = StyleSheet.create({
     textAlign: 'center',
   },
   grid: {
-    padding: 16,
+    padding: 12,
     paddingBottom: 110,
   },
   gridRow: {
     justifyContent: 'space-between',
-    marginBottom: 14,
+    marginBottom: 10,
+    gap: 10,
   },
   card: {
-    width: (SCREEN_WIDTH - 44) / 2,
+    width: (SCREEN_WIDTH - 44) / 3,
     backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 12,
+    borderRadius: 14,
+    padding: 8,
     borderWidth: 1,
     borderColor: '#E2E8F0',
   },
   cardThumb: {
-    height: 104,
-    borderRadius: 14,
+    height: 72,
+    borderRadius: 10,
     backgroundColor: '#F8FAFC',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
     overflow: 'hidden',
   },
   cardName: {
-    fontSize: 14,
+    fontSize: 11,
     fontWeight: '700',
     color: '#0F172A',
-    minHeight: 36,
+    minHeight: 28,
+    lineHeight: 14,
   },
   cardCategory: {
     fontSize: 11,
@@ -544,22 +684,228 @@ const s = StyleSheet.create({
     marginTop: 4,
   },
   cardPrice: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
     color: '#15803D',
   },
-  addBtn: {
-    width: 32,
-    height: 32,
+  cardWas: {
+    fontSize: 10,
+    color: '#94A3B8',
+    textDecorationLine: 'line-through',
+  },
+  cardDealBadge: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    zIndex: 2,
+    backgroundColor: '#DC2626',
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  cardDealBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  sortRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  sortPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  sortPillActive: {
+    backgroundColor: '#16A34A',
+    borderColor: '#16A34A',
+  },
+  sortText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  sortTextActive: {
+    color: '#FFFFFF',
+  },
+  railTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 8,
+  },
+  heroCard: {
+    backgroundColor: '#0F172A',
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 14,
+    overflow: 'hidden',
+  },
+  heroBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.12)',
     borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#A7F3D0',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    overflow: 'hidden',
+  },
+  heroTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    marginTop: 10,
+  },
+  heroSub: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 4,
+    lineHeight: 17,
+  },
+  heroStoreChip: {
+    alignSelf: 'flex-start',
+    marginTop: 10,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  heroStoreChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.85)',
+  },
+  railCard: {
+    backgroundColor: '#FFF1F2',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#FECDD3',
+    padding: 14,
+    marginBottom: 14,
+  },
+  railCardAmber: {
+    backgroundColor: '#FFFBEB',
+    borderColor: '#FDE68A',
+  },
+  railKicker: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#E11D48',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  railKickerAmber: {
+    color: '#D97706',
+  },
+  railSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginBottom: 10,
+  },
+  catalogueHead: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+    paddingBottom: 8,
+    marginBottom: 4,
+  },
+  catalogueTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  catalogueCount: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  dealCard: {
+    width: 130,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    position: 'relative',
+  },
+  dealBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    zIndex: 2,
+    backgroundColor: '#DC2626',
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  dealBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  dealName: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginTop: 6,
+    minHeight: 30,
+  },
+  dealPrice: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#DC2626',
+    marginTop: 4,
+  },
+  dealWas: {
+    fontSize: 10,
+    color: '#94A3B8',
+    textDecorationLine: 'line-through',
+  },
+  topCard: {
+    width: 130,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  topName: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginTop: 6,
+    minHeight: 30,
+  },
+  topMeta: {
+    fontSize: 10,
+    color: '#16A34A',
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  addBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
     backgroundColor: '#16A34A',
     alignItems: 'center',
     justifyContent: 'center',
   },
   addBtnText: {
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 15,
     fontWeight: '800',
+    marginTop: -1,
   },
   empty: {
     alignItems: 'center',

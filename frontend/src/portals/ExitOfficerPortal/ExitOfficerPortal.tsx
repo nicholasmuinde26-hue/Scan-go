@@ -22,6 +22,7 @@ import { Store, Product, User } from '../../types.js';
 import { apiRequest, formatKes } from '../../api.js';
 import { canAny } from '../../permissions.js';
 import { CashierServiceView } from './CashierServiceView.js';
+import { PosTillView } from './PosTillView.js';
 import { HandoverCollectionView } from './HandoverCollectionView.js';
 import { StaffExitVerification } from '../../components/StaffExitVerification.js';
 
@@ -31,7 +32,7 @@ interface ExitOfficerPortalProps {
   currentUser?: User | null;
 }
 
-type ExitPortalTab = 'EXIT_LANE' | 'CASHIER' | 'HANDOVER';
+type ExitPortalTab = 'EXIT_LANE' | 'CASHIER' | 'HANDOVER' | 'POS_TILL';
 
 export const ExitOfficerPortal: React.FC<ExitOfficerPortalProps> = ({
   currentStore,
@@ -40,16 +41,18 @@ export const ExitOfficerPortal: React.FC<ExitOfficerPortalProps> = ({
 }) => {
   const allTabs: { id: ExitPortalTab; label: string }[] = [
     { id: 'EXIT_LANE', label: 'Exit Lane Gate' },
+    { id: 'POS_TILL', label: 'POS Till' },
     { id: 'CASHIER', label: 'Cashier & Helpdesk' },
     { id: 'HANDOVER', label: 'Handover Counter' },
   ];
   const availableTabs = allTabs.filter((tab) => {
     if (tab.id === 'EXIT_LANE') return canAny(currentUser, ['exit:scan', 'exit:verify']);
+    if (tab.id === 'POS_TILL') return canAny(currentUser, ['pos:operate']);
     if (tab.id === 'CASHIER') return canAny(currentUser, ['orders:refund', 'support:resend_receipt', 'support:reset_password']);
     return canAny(currentUser, ['orders:handover']);
   });
   const preferredTab: ExitPortalTab = currentUser?.role === 'CASHIER_CUSTOMER_SERVICE'
-    ? 'CASHIER'
+    ? 'POS_TILL'
     : currentUser?.role === 'DELIVERY_COLLECTION_HANDOVER'
       ? 'HANDOVER'
       : 'EXIT_LANE';
@@ -192,6 +195,9 @@ export const ExitOfficerPortal: React.FC<ExitOfficerPortalProps> = ({
           ))}
         </div>
       </div>
+
+      {/* Render POS Till View */}
+      {activeTab === 'POS_TILL' && canAny(currentUser, ['pos:operate']) && <PosTillView currentStore={currentStore} />}
 
       {/* Render Cashier View */}
       {activeTab === 'CASHIER' && canAny(currentUser, ['orders:refund', 'support:resend_receipt', 'support:reset_password']) && <CashierServiceView currentStore={currentStore} currentUser={currentUser} />}

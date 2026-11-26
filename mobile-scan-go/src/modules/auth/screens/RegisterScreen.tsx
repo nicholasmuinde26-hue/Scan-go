@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import { useRegister, useSendOtp } from '../hooks';
 import { GoogleButton } from '../../../shared/GoogleButton';
 import { GoogleSignInModal } from '../components/GoogleSignInModal';
@@ -28,6 +29,7 @@ export default function RegisterScreen() {
   const [sent, setSent] = useState(false);
   const [consent, setConsent] = useState(false);
   const [showGoogleModal, setShowGoogleModal] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const topPadding = Math.max(insets.top, 20) + 12;
   const bottomPadding = Math.max(insets.bottom, 16) + 30;
@@ -85,6 +87,21 @@ export default function RegisterScreen() {
           <Text style={s.backText}>‹  Back</Text>
         </Pressable>
 
+        {/* Brand header */}
+        <View style={s.brandRow}>
+          <Text style={s.brandLogo}>
+            scan<Text style={{ color: '#F97316' }}>&</Text>go
+          </Text>
+          <View style={s.brandBadge}>
+            <Svg width={22} height={22} viewBox="0 0 100 100">
+              <Circle cx="50" cy="50" r="46" fill="#DCFCE7" />
+              <Path d="M30 42 L70 42 L66 72 L34 72 Z" fill="#16A34A" />
+              <Circle cx="44" cy="38" r="8" fill="#EF4444" />
+              <Circle cx="58" cy="36" r="7" fill="#F97316" />
+            </Svg>
+          </View>
+        </View>
+
         <Text style={s.heading}>Create account</Text>
         <Text style={s.sub}>
           Join Scan & Go to skip checkout lines and enjoy personalized discounts.
@@ -120,13 +137,21 @@ export default function RegisterScreen() {
           placeholder="name@example.com"
           keyboardType="email-address"
         />
-        <Field
-          label="Password (min 12 chars)"
-          value={password}
-          onChange={setPassword}
-          placeholder="••••••••••••"
-          secureTextEntry
-        />
+        <View style={s.fieldWrapper}>
+          <Text style={s.label}>PASSWORD (MIN 12 CHARS)</Text>
+          <View style={s.passwordWrap}>
+            <TextInput
+              value={password}
+              onChangeText={setPassword}
+              placeholder="••••••••••••"
+              secureTextEntry={!showPassword}
+              style={[s.input, s.passwordInput]}
+            />
+            <Pressable style={s.eyeBtn} onPress={() => setShowPassword(!showPassword)}>
+              <Text style={s.eyeText}>{showPassword ? '🙈' : '👁'}</Text>
+            </Pressable>
+          </View>
+        </View>
 
         {sent && (
           <View style={s.otpContainer}>
@@ -248,6 +273,28 @@ const s = StyleSheet.create({
     fontWeight: '700',
     fontSize: 16,
   },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 18,
+  },
+  brandLogo: {
+    fontSize: 24,
+    fontWeight: '900',
+    color: '#15803D',
+    letterSpacing: -0.5,
+  },
+  brandBadge: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#F0FDF4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#DCFCE7',
+  },
   heading: {
     fontSize: 28,
     fontWeight: '800',
@@ -300,6 +347,22 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E2E8F0',
     color: '#0F172A',
+  },
+  passwordWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  passwordInput: {
+    flex: 1,
+    paddingRight: 48,
+  },
+  eyeBtn: {
+    position: 'absolute',
+    right: 12,
+    padding: 6,
+  },
+  eyeText: {
+    fontSize: 16,
   },
   otpContainer: {
     backgroundColor: '#F0FDF4',

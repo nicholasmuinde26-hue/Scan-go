@@ -1,0 +1,15 @@
+import mongoose from 'mongoose';
+const { default: Payment } = await import('./src/modules/payments/payment.model.js');
+const { default: Order } = await import('./src/modules/orders/order.model.js');
+const { finalizeSuccessfulPayment } = await import('./src/modules/payments/reconciliation.job.js');
+await mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/scan_and_go_db');
+const pid = '6b07f4ad00173999e484fb25';
+const payment: any = await Payment.findById(pid);
+const order: any = await Order.findById(payment.orderId);
+console.log('before:', payment.status, '| order', order.orderNumber, order.status);
+const r = await finalizeSuccessfulPayment(payment, order, undefined, 'RECONCILIATION_JOB');
+console.log('result:', JSON.stringify(r));
+const p2: any = await Payment.findById(pid).select('status mpesaReceiptNumber');
+const o2: any = await Order.findById(order._id).select('status paidMinor collectionQrToken');
+console.log('after payment:', p2.status, p2.mpesaReceiptNumber, '| order:', o2.status, 'paidMinor:', o2.paidMinor, 'qr:', !!o2.collectionQrToken);
+await mongoose.disconnect();

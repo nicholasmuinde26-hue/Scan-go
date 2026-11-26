@@ -307,6 +307,41 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Decode a barcode from an uploaded image — the mobile "scan from photo" fallback,
+// matching the web scanner's file-upload path. Uses zxing-wasm (same ZXing engine
+// family as Html5Qrcode) so decoding behaviour is consistent across clients.
+router.post('/decode-image', async (req, res) => {
+  try {
+    const raw = typeof req.body?.imageBase64 === 'string' ? req.body.imageBase64.trim() : '';
+    const dataUrl = raw.match(/^data:image\/[a-zA-Z0-9+.-]+;base64,(.*)$/s);
+    const b64 = dataUrl ? dataUrl[1] : raw;
+    if (!b64 || b64.length > 11_000_000) {
+      res.status(400).json({ success: false, error: 'Provide a base64 image in imageBase64 (data URL or raw base64).' });
+      return;
+    }
+    const bytes = Buffer.from(b64, 'base64');
+    if (!bytes.length) {
+      res.status(400).json({ success: false, error: 'Image payload is empty or not valid base64.' });
+      return;
+    }
+    const { readBarcodes } = await import('zxing-wasm/reader');
+    const results = await readBarcodes(new Uint8Array(bytes), {
+      tryHarder: true,
+      tryRotate: true,
+      tryInvert: true,
+      maxNumberOfSymbols: 5,
+    });
+    const hit = results.find((r: any) => r.isValid !== false && r.text);
+    if (!hit) {
+      res.status(404).json({ success: false, error: 'No barcode found in that image. Get closer, improve lighting, and keep the code flat and inside the frame.' });
+      return;
+    }
+    res.json({ success: true, barcode: hit.text, format: hit.format });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'Could not decode image.' });
+  }
+});
+
 // Lookup product by barcode
 router.get('/barcode/:barcode', async (req, res) => {
   try {
@@ -442,7 +477,7 @@ router.post('/bulk-import', authenticate, requirePermission('inventory:write', '
             existing.highTheft = !!item.highTheft;
             existing.isWeighted = !!item.isWeighted;
             if (priceMinor !== existing.priceMinor || Number(item.vatRateBps ?? existing.vatRateBps) !== existing.vatRateBps || (Number(item.compareAtPriceMinor) || undefined) !== existing.compareAtPriceMinor) {
-              await Approval.create({ type: 'INVENTORY_CHANGE', status: 'PENDING', requestedBy: req.user!.id, requestedByRole: req.user!.role, requestedByName: req.user!.name, targetType: 'PRODUCT', targetId: existing._id, requestData: { kind: 'PRICE_CHANGE', storeId: branchId, priceMinor, previousPriceMinor: existing.priceMinor, compareAtPriceMinor: Number(item.compareAtPriceMinor) || null, vatRateBps: Number(item.vatRateBps || 0) }, requiresSecondFactor: false, expiresAt: new Date(Date.now() + 7 * 86400000), creatorCanApprove: false });
+              await Approval.create({ type: 'INVENTORY_CHANGE', status: 'PENDING', requestedBy: req.user!.id, requestedByRole: req.user!.role, requestedByName: req.user!.name, targetType: 'PRODUCT', targetId: existing._id, requestData: { kind: 'PRICE_CHANGE', storeId: branchId, priceMinor, previousPriceMinor: existing.priceMinor, compareAtPriceMinor: Number(item.compareAtPriceMinor) || null, vatRateBps: Number(item.vatRateBps || 0) }, requiresSecondFactor: false, expiresAt: new Date(Date.now() + 7 * 86400000), creatorCanApprove: req.user!.role === 'CATALOGUE_INVENTORY_MANAGER' });
               pendingPriceApprovals++;
             }
             await existing.save();
@@ -718,7 +753,7 @@ router.post('/:id/price-change', authenticate, requirePermission('pricing:write'
     if (product.soldBy === 'weight' && (!Number.isInteger(pricePerKgMinor) || Number(pricePerKgMinor) <= 0)) return res.status(400).json({ success: false, error: 'A weighted product needs a positive integer price per kg.' });
     const compareAtPriceMinor = req.body.compareAtPriceMinor == null ? undefined : Number(req.body.compareAtPriceMinor);
     if (compareAtPriceMinor !== undefined && (!Number.isInteger(compareAtPriceMinor) || compareAtPriceMinor <= priceMinor)) return res.status(400).json({ success: false, error: 'Was price must be greater than the proposed selling price.' });
-    const approval = await Approval.create({ type: 'INVENTORY_CHANGE', status: 'PENDING', requestedBy: req.user!.id, requestedByRole: req.user!.role, requestedByName: req.user!.name, targetType: 'PRODUCT', targetId: product._id, requestData: { kind: 'PRICE_CHANGE', storeId: product.storeId, priceMinor, previousPriceMinor: product.priceMinor, pricePerKgMinor, previousPricePerKgMinor: product.pricePerKgMinor, compareAtPriceMinor: req.body.compareAtPriceMinor ?? null, vatRateBps }, requiresSecondFactor: false, expiresAt: new Date(Date.now() + 7 * 86400000), creatorCanApprove: false, notes: String(req.body.reason || '').trim() });
+    const approval = await Approval.create({ type: 'INVENTORY_CHANGE', status: 'PENDING', requestedBy: req.user!.id, requestedByRole: req.user!.role, requestedByName: req.user!.name, targetType: 'PRODUCT', targetId: product._id, requestData: { kind: 'PRICE_CHANGE', storeId: product.storeId, priceMinor, previousPriceMinor: product.priceMinor, pricePerKgMinor, previousPricePerKgMinor: product.pricePerKgMinor, compareAtPriceMinor: req.body.compareAtPriceMinor ?? null, vatRateBps }, requiresSecondFactor: false, expiresAt: new Date(Date.now() + 7 * 86400000), creatorCanApprove: req.user!.role === 'CATALOGUE_INVENTORY_MANAGER', notes: String(req.body.reason || '').trim() });
     await logInventory(req, { action: 'PRODUCT_PRICE_CHANGE_REQUESTED', entityId: product._id.toString(), storeId: product.storeId, previousValue: { priceMinor: product.priceMinor }, newValue: { priceMinor, approvalId: approval._id }, reason: String(req.body.reason || 'Price change requested').trim() });
     return res.status(202).json({ success: true, approval, message: 'Price change submitted for branch manager approval.' });
   } catch (error: any) { return res.status(400).json({ success: false, error: error.message }); }
@@ -739,9 +774,14 @@ router.post('/inventory/approvals/:id/decision', authenticate, requireAnyPermiss
     const approval = await Approval.findById(req.params.id);
     if (!approval || approval.targetType !== 'PRODUCT' || approval.status !== 'PENDING') return res.status(404).json({ success: false, error: 'Pending inventory approval not found.' });
     const isRegistration = approval.requestData?.kind === 'PRODUCT_REGISTRATION';
-    // Separation of duties stays for price and stock changes. A catalogue manager (who sets prices AND approves) may approve a
-    // product registration they raised themselves, since they are the authority that registration is waiting for.
-    if (approval.requestedBy.toString() === req.user!.id && !(isRegistration && canApproveRegistrations(req))) return res.status(403).json({ success: false, error: 'The requester cannot approve their own change.' });
+    const isSelfApproval = approval.requestedBy.toString() === req.user!.id;
+    // Separation of duties stays for everyone else. The catalogue & inventory manager is the pricing/catalogue
+    // authority, so they may approve their own price/registration/stock-variance requests — every decision is still
+    // written to the hash-chained audit log with requestedBy == approvedBy for accountability.
+    const selfApproveAllowed = isRegistration
+      ? canApproveRegistrations(req)
+      : req.user!.role === 'CATALOGUE_INVENTORY_MANAGER';
+    if (isSelfApproval && !selfApproveAllowed) return res.status(403).json({ success: false, error: 'The requester cannot approve their own change.' });
     const storeId = String(approval.requestData.storeId);
     if (!(await hasStoreScope(req, storeId))) return res.status(403).json({ success: false, error: 'You cannot approve changes for this branch.' });
     if (isRegistration) {
@@ -760,7 +800,7 @@ router.post('/inventory/approvals/:id/decision', authenticate, requireAnyPermiss
     const decidedApproval = await Approval.findOneAndUpdate(
       { _id: approval._id, targetType: 'PRODUCT', status: 'PENDING' },
       { $set: decision === 'APPROVED'
-        ? { status: decision, approvedBy: req.user!.id, approvedByName: req.user!.name, approvedByRole: req.user!.role, approvedAt: decidedAt, notes: String(reason).trim() }
+        ? { status: decision, approvedBy: req.user!.id, approvedByName: req.user!.name, approvedByRole: req.user!.role, approvedAt: decidedAt, notes: `${String(reason).trim()}${isSelfApproval ? ' [self-approved]' : ''}` }
         : { status: decision, rejectedBy: req.user!.id, rejectedByName: req.user!.name, rejectedByRole: req.user!.role, rejectedAt: decidedAt, rejectionReason: String(reason).trim() } },
       { new: true }
     );
@@ -824,7 +864,7 @@ router.post('/inventory/approvals/:id/decision', authenticate, requireAnyPermiss
     }
     approval.status = decision;
     if (decision === 'APPROVED' && change.kind === 'PRODUCT_REGISTRATION') await UnknownBarcode.updateOne({ storeId, barcode: product.barcode, status: 'OPEN' }, { $set: { status: 'RESOLVED', productId: product._id } });
-    await logInventory(req, { action: `${change.kind || 'PRODUCT_REGISTRATION'}_${decision}`, entityId: product._id.toString(), storeId, reason: String(reason).trim(), newValue: { approvalId: approval._id, product: product.toObject(), receiptId: registrationReceipt?._id } });
+    await logInventory(req, { action: `${change.kind || 'PRODUCT_REGISTRATION'}_${decision}`, entityId: product._id.toString(), storeId, reason: String(reason).trim(), newValue: { approvalId: approval._id, selfApproved: isSelfApproval, product: product.toObject(), receiptId: registrationReceipt?._id } });
     return res.json({ success: true, approval: decidedApproval, product });
   } catch (error: any) { return res.status(error.status || 500).json({ success: false, error: error.message }); }
 });

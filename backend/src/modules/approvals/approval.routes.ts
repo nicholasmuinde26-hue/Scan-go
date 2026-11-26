@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
-import { authenticate, requirePermission, AuthRequest } from '../../middleware/auth.js';
-import Approval from './approval.model.js';
+import { authenticate, requirePermission, requireAnyPermission, AuthRequest, canAccessStore } from '../../middleware/auth.js';
+import { requireStoreAccess } from '../../middleware/access.js';
+import Approval, { ApprovalStatus } from './approval.model.js';
 import {
   createApprovalRequest,
   approveApproval,
@@ -37,6 +38,63 @@ router.get('/pending', requirePermission('payouts:approve', 'platform:admins:app
   try {
     const approvals = await getPendingApprovals(req);
     res.json({ success: true, approvals });
+  } catch (error: any) {
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Branch-level maker-checker queue: pending store approvals (refunds, voids,
+ * price overrides) for one branch. Separate from /pending, which is the
+ * platform/org payout & admin-appointment inbox.
+ */
+router.get('/store/:storeId/pending', requireAnyPermission('supervisor:approve', 'supervisor:override', 'staff:manage'), requireStoreAccess('params', 'storeId'), async (req: AuthRequest, res: Response) => {
+  try {
+    const approvals = await Approval.find({
+      status: ApprovalStatus.PENDING,
+      expiresAt: { $gt: new Date() },
+      $or: [
+        { targetType: 'STORE', targetId: req.params.storeId },
+        { 'requestData.storeId': req.params.storeId },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .limit(100);
+
+    // Separation of duties: hide the caller's own requests unless they may self-approve.
+    const visible = approvals.filter((a) => a.creatorCanApprove || a.requestedBy.toString() !== req.user!.id);
+    res.json({ success: true, approvals: visible });
+  } catch (error: any) {
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Review a store-scoped approval (branch manager / supervisor decision).
+ * Body: { decision: 'APPROVED' | 'REJECTED', note?: string }
+ */
+router.post('/:id/review', requireAnyPermission('supervisor:approve', 'supervisor:override', 'staff:manage'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { decision, note } = req.body || {};
+    if (decision !== 'APPROVED' && decision !== 'REJECTED') {
+      return res.status(400).json({ success: false, error: "decision must be 'APPROVED' or 'REJECTED'." });
+    }
+
+    const approval = await Approval.findById(req.params.id);
+    if (!approval || approval.status !== ApprovalStatus.PENDING) {
+      return res.status(404).json({ success: false, error: 'Pending approval not found.' });
+    }
+
+    // Store-scoped approvals may only be reviewed by someone who can access that branch.
+    if (approval.targetType === 'STORE' && !(await canAccessStore(req.user!, String(approval.targetId)))) {
+      return res.status(404).json({ success: false, error: 'Approval not found.' });
+    }
+
+    const updated = decision === 'APPROVED'
+      ? await approveApproval(req, approval._id.toString(), note)
+      : await rejectApproval(req, approval._id.toString(), note || 'Rejected by reviewer');
+
+    res.json({ success: true, approval: updated });
   } catch (error: any) {
     res.status(error.status || 500).json({ success: false, error: error.message });
   }

@@ -71,6 +71,9 @@ export interface IUser extends Document {
   permissionExpiry?: Date;
   // Account status
   status: 'ACTIVE' | 'SUSPENDED' | 'ON_LEAVE' | 'DEACTIVATED';
+  // Shadow account created by a guest pass/kiosk — can transact via the guest
+  // token but has no password login and should be hidden from staff directories.
+  isGuest?: boolean;
   // Last activity tracking
   lastLoginAt?: Date;
   lastPasswordChangeAt?: Date;
@@ -195,6 +198,7 @@ const userSchema = new Schema<IUser>(
     permissionExpiry: { type: Date },
     // Account status
     status: { type: String, enum: ['ACTIVE', 'SUSPENDED', 'ON_LEAVE', 'DEACTIVATED'], default: 'ACTIVE' },
+    isGuest: { type: Boolean, default: false },
     active: { type: Boolean, default: true, index: true },
     failedLoginAttempts: { type: Number, default: 0 },
     lockoutUntil: { type: Date },

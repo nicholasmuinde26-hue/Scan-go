@@ -14,10 +14,13 @@ import {
   View,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { StatusBar } from 'expo-status-bar';
+import * as ImagePicker from 'expo-image-picker';
+import { useAudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import Svg, { Path, Rect, Line } from 'react-native-svg';
 import { useCheckIn, usePresence } from '../../presence';
 import { currentStore } from '../../stores';
@@ -29,13 +32,17 @@ import {
   useUpdateBasketLine,
 } from '../index';
 import type { Basket, BasketLine } from '../types';
+import type { Product } from '../../catalog/types';
 import { requestLocationPermission } from '../../../core/permissions';
+import { catalogApi } from '../../catalog/api';
+import { formatKes } from '../../../shared/money';
 import { notify, confirmDialog } from '../../../shared/ui/feedback';
+import { shoppingList, type ShoppingListItem } from '../shoppingList';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 export default function ScanScreen() {
-  const insets = useSafeAreaInsets();
+
   const [permission, requestPermission] = useCameraPermissions();
   const [store, setStore] = useState<Store | null>(null);
   const [basket, setBasket] = useState<Basket | null>(null);
@@ -48,10 +55,17 @@ export default function ScanScreen() {
   const [manualCode, setManualCode] = useState('');
   const [zoom, setZoom] = useState(0);
   const [lastScanLabel, setLastScanLabel] = useState('');
+  const [scanError, setScanError] = useState('');
+  const [decodingPhoto, setDecodingPhoto] = useState(false);
+  const [listItems, setListItems] = useState<ShoppingListItem[]>([]);
+  const [listInput, setListInput] = useState('');
+  const [listSuggestions, setListSuggestions] = useState<Product[]>([]);
+  const beep = useAudioPlayer(require('../../../../assets/beep.wav'));
   const recentScans = useRef<Map<string, number>>(new Map());
+  const checkedInPoster = useRef<string>('');
 
-  const topPadding = Math.max(insets.top, 24) + 10;
-  const bottomDockPadding = Math.max(insets.bottom, 16) + 12;
+  const topPadding = useTopInset(10);
+  const bottomDockPadding = useBottomInset(12);
 
   // Laser animation
   const laserAnim = useRef(new Animated.Value(0)).current;
@@ -67,6 +81,7 @@ export default function ScanScreen() {
       setStore(newStore);
       setBasket(null);
       setMode('checkin');
+      checkedInPoster.current = '';
     });
   }, []);
 
@@ -83,6 +98,30 @@ export default function ScanScreen() {
         .catch(() => {});
     }
   }, [store, presenceQuery.data]);
+
+  // Shopping list — persisted locally, auto-checks items as they are scanned.
+  useEffect(() => {
+    shoppingList.all().then(setListItems);
+    return shoppingList.subscribe(setListItems);
+  }, []);
+
+  // Live product suggestions while typing in the add-item field.
+  useEffect(() => {
+    const q = listInput.trim();
+    if (q.length < 2 || !store?._id) {
+      setListSuggestions([]);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const r = await catalogApi.list({ search: q, storeId: store._id });
+        setListSuggestions((r.products || []).slice(0, 5));
+      } catch {
+        setListSuggestions([]);
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [listInput, store?._id]);
 
   // Start laser animation when scanner opens
   useEffect(() => {
@@ -119,30 +158,64 @@ export default function ScanScreen() {
         if (now - ts > 60_000) recentScans.current.delete(code);
       }
     }
+    // Poster QRs encode a URL (https://…/enter?p=<signed code>), not the raw code.
+    // Extract the `p` param; a scan containing it is ALWAYS a poster check-in,
+    // even when the store doesn't enforce check-in and we're already in scan mode.
+    const posterParam = data.match(/[?&]p=([^&#]+)/);
+    const posterCode = posterParam ? decodeURIComponent(posterParam[1]) : null;
+    const isPosterScan = mode === 'checkin' || posterCode !== null;
+
+    // Already checked in with this poster — ignore repeat detections so the
+    // camera can't restart the session in a loop while the QR stays in frame.
+    if (posterCode && posterCode === checkedInPoster.current) return;
+
     setBusy(true);
+    setScanError('');
+    setLastScanLabel(`Detected: ${posterCode ?? data}`);
+    // Scan beep — same audible confirmation the web scanner gives.
+    try {
+      beep.seekTo(0);
+      beep.play();
+    } catch {}
 
     try {
-      if (mode === 'checkin') {
-        let gps: any;
+      if (isPosterScan) {
+        const code = posterCode ?? data;
+        let gps: { lat: number; lng: number; accuracyM?: number } | undefined;
         try {
           const allowed = await requestLocationPermission();
           if (allowed.granted) {
             const position = await Location.getCurrentPositionAsync({
-              accuracy: Location.Accuracy.Balanced,
+              accuracy: Location.Accuracy.High,
             });
+            // Backend parseGps expects {lat,lng,accuracyM} — sending
+            // {latitude,longitude} silently dropped the signal and every
+            // check-in failed with SOFT_SIGNAL_REQUIRED.
             gps = {
-              latitude: position.coords.latitude,
-              longitude: position.coords.longitude,
+              lat: position.coords.latitude,
+              lng: position.coords.longitude,
+              accuracyM: position.coords.accuracy ?? undefined,
             };
           }
         } catch {}
 
-        const r = await checkinMutation.mutateAsync({ code: data, gps });
+        const r = await checkinMutation.mutateAsync({ code, gps });
+        if (posterCode) checkedInPoster.current = posterCode;
         setMode('scan');
         setStore((s) => (s ? { ...s, _id: r.store._id, name: r.store.name } : s));
-        setIsScannerOpen(false);
+        // Proceed like the web /enter flow: sign-in completes and the user
+        // lands ready to scan — keep the camera open in product-scan mode
+        // instead of dumping them back on the start screen.
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        notify(`Checked in!: You're checked in at ${r.store.name}. Tap "Scan" to scan barcodes.`, 'info');
+        setLastScanLabel(`Checked in at ${r.store.name} — scan items`);
+        setTimeout(() => setLastScanLabel(''), 2600);
+        basketApi
+          .open(r.store._id)
+          .then(async (b) => {
+            setBasket(b.basket);
+            await activeBasket.set(b.basket._id);
+          })
+          .catch(() => {});
         return;
       }
 
@@ -150,6 +223,32 @@ export default function ScanScreen() {
         notify(`Choose a store: Please select a supermarket from Home first.`, 'info');
         return;
       }
+
+      // Resolve the product first: unrecognized codes get an inline warning,
+      // recognized ones ask for confirmation before touching the basket.
+      let product: Product | null = null;
+      try {
+        const pr = await catalogApi.barcode(data, store._id);
+        product = pr.product ?? null;
+      } catch {
+        product = null;
+      }
+
+      if (!product) {
+        const msg = 'Not recognized — this barcode is not a registered product at this store.';
+        setScanError(msg);
+        setLastScanLabel('');
+        notify(msg, 'error');
+        return;
+      }
+
+      const confirmed = await confirmDialog(
+        'Add to basket?',
+        `${product.name} — ${formatKes(product.priceMinor)}`,
+        'Add',
+        false
+      );
+      if (!confirmed) return;
 
       let basketId = await activeBasket.get();
       if (!basketId) {
@@ -160,17 +259,62 @@ export default function ScanScreen() {
 
       const r = await scanMutation.mutateAsync({ basketId, barcode: data });
       setBasket(r.basket);
+      shoppingList.markScanned(product._id, product.name);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      // Continuous scanning: keep the camera open so the next item can be scanned
-      // immediately. Show a brief inline confirmation instead of closing the modal.
+      // Camera stays open for the next item; the basket panel below the
+      // viewfinder shows what was just added plus the running total.
       const items = r.basket.items || [];
-      setLastScanLabel(items.length ? items[items.length - 1].name : 'Item added');
-      setTimeout(() => setLastScanLabel(''), 1600);
+      const addedName = items.length ? items[items.length - 1].name : 'Item added';
+      setLastScanLabel(`Added: ${addedName}`);
+      setTimeout(() => setLastScanLabel(''), 2000);
     } catch (e: any) {
-      notify(`${e instanceof Error ? e.message : 'Item barcode not recognized. Please retry or enter manually.'}`, 'error');
+      const msg = e instanceof Error ? e.message : 'Item barcode not recognized. Please retry or enter manually.';
+      setScanError(msg);
+      setLastScanLabel('');
+      notify(msg, 'error');
+      setTimeout(() => setLastScanLabel(''), 2500);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const addListItem = async (name: string, productId?: string) => {
+    setListItems(await shoppingList.add(name, productId));
+    setListInput('');
+    setListSuggestions([]);
+  };
+
+  const uncheckedCount = listItems.filter((i) => !i.checked).length;
+
+  // "Scan from photo" fallback — same idea as the web scanner's file upload:
+  // pick/capture an image, decode the barcode server-side (ZXing), then run
+  // the exact same scan pipeline as a live camera detection.
+  const scanFromPhoto = async (source: 'camera' | 'library') => {
+    if (decodingPhoto || busy) return;
+    try {
+      const options: ImagePicker.ImagePickerOptions = {
+        mediaTypes: ['images'],
+        base64: true,
+        quality: 0.7,
+        allowsEditing: false,
+      };
+      const result =
+        source === 'camera'
+          ? await ImagePicker.launchCameraAsync(options)
+          : await ImagePicker.launchImageLibraryAsync(options);
+      const asset = result.assets?.[0];
+      if (result.canceled || !asset?.base64) return;
+
+      setDecodingPhoto(true);
+      const mime = asset.mimeType || 'image/jpeg';
+      const r = await catalogApi.decodeImage(`data:${mime};base64,${asset.base64}`);
+      notify(`Detected: ${r.barcode}`, 'info');
+      await handleBarcodeScanned(r.barcode);
+    } catch (e: any) {
+      notify(e?.message || 'Could not read a barcode from that photo. Get closer, improve lighting, and keep the code flat.', 'error');
+    } finally {
+      setDecodingPhoto(false);
     }
   };
 
@@ -345,12 +489,96 @@ export default function ScanScreen() {
           />
         )
       ) : (
-        <View style={s.emptyState}>
-          <Text style={{ fontSize: 40, marginBottom: 12 }}>📝</Text>
-          <Text style={s.emptyTitle}>Personal Shopping List</Text>
-          <Text style={s.emptyDesc}>
-            Items you mark here will cross off automatically as you scan them into your basket.
+        <FlatList
+          data={listItems}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={[s.listContent, { paddingBottom: bottomDockPadding + 90 }]}
+          ListEmptyComponent={
+            <View style={s.emptyState}>
+              <Text style={{ fontSize: 40, marginBottom: 12 }}>📝</Text>
+              <Text style={s.emptyTitle}>Your list is empty</Text>
+              <Text style={s.emptyDesc}>
+                Add items above or pick them from the store catalog — they check themselves off as you scan them.
+              </Text>
+            </View>
+          }
+          ListHeaderComponent={
+            <View style={s.listAddCard}>
+              <Text style={s.listAddTitle}>
+                Add to list{uncheckedCount > 0 ? ` — ${uncheckedCount} to find` : ''}
+              </Text>
+              <View style={s.listAddRow}>
+                <TextInput
+                  style={s.listInput}
+                  placeholder="e.g. Milk, bread, Unga…"
+                  placeholderTextColor="#94a3b8"
+                  value={listInput}
+                  onChangeText={setListInput}
+                  onSubmitEditing={() => addListItem(listInput)}
+                  returnKeyType="done"
+                />
+                <Pressable
+                  style={[s.listAddBtn, !listInput.trim() && { opacity: 0.4 }]}
+                  disabled={!listInput.trim()}
+                  onPress={() => addListItem(listInput)}
+                >
+                  <Text style={s.listAddBtnText}>Add</Text>
+                </Pressable>
+              </View>
+              {listSuggestions.length > 0 && (
+                <View style={s.suggestionList}>
+                  {listSuggestions.map((p) => (
+                    <Pressable
+                      key={p._id}
+                      style={s.suggestionRow}
+                      onPress={() => addListItem(p.name, p._id)}
+                    >
+                      <Text style={s.suggestionName} numberOfLines={1}>{p.name}</Text>
+                      <Text style={s.suggestionPrice}>{formatKes(p.priceMinor)}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+            </View>
+          }
+          ListFooterComponent={
+            uncheckedCount === 0 && listItems.length > 0 ? (
+              <Pressable style={s.clearCheckedBtn} onPress={() => shoppingList.clearChecked().then(setListItems)}>
+                <Text style={s.clearCheckedText}>Clear checked items</Text>
+              </Pressable>
+            ) : undefined
+          }
+          renderItem={({ item }) => (
+            <View style={[s.listItemCard, item.checked && s.listItemCardChecked]}>
+              <Pressable
+                style={[s.listCheck, item.checked && s.listCheckDone]}
+                onPress={() => shoppingList.toggle(item.id).then(setListItems)}
+              >
+                {item.checked && <Text style={s.listCheckMark}>✓</Text>}
+              </Pressable>
+              <View style={{ flex: 1 }}>
+                <Text style={[s.listItemName, item.checked && s.listItemNameChecked]} numberOfLines={2}>
+                  {item.name}
+                </Text>
+                {item.checked && <Text style={s.listItemDone}>Found & added to basket</Text>}
+              </View>
+              <Pressable onPress={() => shoppingList.remove(item.id).then(setListItems)} style={s.listRemoveBtn}>
+                <Text style={s.listRemoveText}>✕</Text>
+              </Pressable>
+            </View>
+          )}
+        />
+      )}
+
+      {/* Presence status error — surfaced instead of silently demanding check-in */}
+      {presenceQuery.isError && (
+        <View style={s.presenceError}>
+          <Text style={s.presenceErrorText}>
+            Could not verify store check-in status{presenceQuery.error instanceof Error ? `: ${presenceQuery.error.message}` : '.'}
           </Text>
+          <Pressable onPress={() => presenceQuery.refetch()}>
+            <Text style={s.presenceRetry}>Retry</Text>
+          </Pressable>
         </View>
       )}
 
@@ -371,7 +599,10 @@ export default function ScanScreen() {
         {/* Center Floating Scan FAB Button (Image 5) */}
         <Pressable
           style={s.centerScanFab}
-          onPress={() => setIsScannerOpen(true)}
+          onPress={() => {
+            presenceQuery.refetch();
+            setIsScannerOpen(true);
+          }}
         >
           <View style={s.fabInnerRing}>
             <Text style={s.fabIcon}>⌗</Text>
@@ -410,9 +641,10 @@ export default function ScanScreen() {
             onBarcodeScanned={({ data }) => handleBarcodeScanned(data)}
           />
 
-          {/* Scanner Overlay UI (Image 5 Center) */}
+          {/* Scanner Overlay UI */}
           <View style={[s.scannerOverlay, { paddingTop: topPadding, paddingBottom: bottomDockPadding + 14 }]}>
-            {/* Top Bar with Close and Torch */}
+            <StatusBar style="light" />
+            {/* Top Bar: close · mode chip · torch */}
             <View style={s.scannerTopBar}>
               <Pressable
                 style={s.scannerCloseBtn}
@@ -421,89 +653,149 @@ export default function ScanScreen() {
                 <Text style={s.scannerCloseText}>✕</Text>
               </Pressable>
 
+              <View style={s.modeChip}>
+                <View style={[s.modeDot, mode === 'scan' && s.modeDotScan]} />
+                <Text style={s.modeChipText}>
+                  {mode === 'checkin' ? 'Entrance check-in' : store?.name || 'Scan & Go'}
+                </Text>
+              </View>
+
               <Pressable
                 style={[s.torchBtn, torchOn && s.torchBtnActive]}
                 onPress={() => setTorchOn(!torchOn)}
               >
-                <Text style={s.torchText}>{torchOn ? '🔦 ON' : '🔦'}</Text>
+                <Text style={s.torchText}>{torchOn ? 'LIGHT ON' : 'LIGHT'}</Text>
               </Pressable>
             </View>
 
-            {/* Instruction Title */}
-            <View style={s.scannerInstruction}>
-              <Text style={s.scannerTitleIcon}>⌗</Text>
+            {/* Header */}
+            <View style={s.scannerHeader}>
               <Text style={s.scannerTitle}>
-                {mode === 'checkin' ? 'Check in at the entrance' : 'Add product'}
+                {mode === 'checkin' ? 'Scan the entrance poster' : 'Scan a product'}
               </Text>
               <Text style={s.scannerSubtitle}>
                 {mode === 'checkin'
-                  ? 'Scan the store entrance poster to begin'
-                  : 'Align barcode inside the frame'}
+                  ? 'Point at the QR poster to check in at this store'
+                  : 'Hold steady — the code is read automatically'}
               </Text>
             </View>
 
-            {/* Viewfinder Reticle Frame with Moving Laser Line */}
-            <View style={s.viewfinderWrapper}>
-              <View style={s.viewfinder}>
-                {/* Corner reticle marks */}
-                <View style={[s.corner, s.cornerTL]} />
-                <View style={[s.corner, s.cornerTR]} />
-                <View style={[s.corner, s.cornerBL]} />
-                <View style={[s.corner, s.cornerBR]} />
+            {/* Middle zone: viewfinder, confirmation badge, zoom */}
+            <View style={s.scannerMiddle}>
+              {/* Viewfinder Reticle Frame with Moving Laser Line */}
+              <View style={s.viewfinderWrapper}>
+                <View style={s.viewfinder}>
+                  {/* Corner reticle marks */}
+                  <View style={[s.corner, s.cornerTL]} />
+                  <View style={[s.corner, s.cornerTR]} />
+                  <View style={[s.corner, s.cornerBL]} />
+                  <View style={[s.corner, s.cornerBR]} />
 
-                {/* Animated Green Laser Line */}
-                <Animated.View
-                  style={[
-                    s.laserLine,
-                    {
-                      transform: [{ translateY: laserAnim }],
-                    },
-                  ]}
-                />
+                  {/* Animated Green Laser Line */}
+                  <Animated.View
+                    style={[
+                      s.laserLine,
+                      {
+                        transform: [{ translateY: laserAnim }],
+                      },
+                    ]}
+                  />
+                </View>
               </View>
+
+              {/* Scan confirmation badge */}
+              {lastScanLabel ? (
+                <View style={s.scanBadge}>
+                  <Text style={s.scanBadgeText}>✓ {lastScanLabel}</Text>
+                </View>
+              ) : null}
+
+              {/* Zoom controls for distance scanning */}
+              {mode === 'scan' && (
+                <View style={s.zoomPad}>
+                  <Pressable
+                    style={[s.zoomBtn, zoom <= 0 && s.zoomBtnDisabled]}
+                    onPress={() => setZoom((z) => Math.max(0, +(z - 0.2).toFixed(2)))}
+                    disabled={zoom <= 0}
+                  >
+                    <Text style={s.zoomBtnText}>−</Text>
+                  </Pressable>
+                  <Text style={s.zoomLabel}>{Math.round(zoom * 100)}%</Text>
+                  <Pressable
+                    style={[s.zoomBtn, zoom >= 1 && s.zoomBtnDisabled]}
+                    onPress={() => setZoom((z) => Math.min(1, +(z + 0.2).toFixed(2)))}
+                    disabled={zoom >= 1}
+                  >
+                    <Text style={s.zoomBtnText}>＋</Text>
+                  </Pressable>
+                </View>
+              )}
             </View>
-
-            {/* Scan confirmation badge (continuous mode) */}
-            {lastScanLabel ? (
-              <View style={s.scanBadge}>
-                <Text style={s.scanBadgeText}>✓ {lastScanLabel}</Text>
-              </View>
-            ) : null}
-
-            {/* Zoom controls for distance scanning */}
-            {mode === 'scan' && (
-              <View style={s.zoomPad}>
-                <Pressable
-                  style={[s.zoomBtn, zoom <= 0 && s.zoomBtnDisabled]}
-                  onPress={() => setZoom((z) => Math.max(0, +(z - 0.2).toFixed(2)))}
-                  disabled={zoom <= 0}
-                >
-                  <Text style={s.zoomBtnText}>−</Text>
-                </Pressable>
-                <Text style={s.zoomLabel}>{Math.round(zoom * 100)}%</Text>
-                <Pressable
-                  style={[s.zoomBtn, zoom >= 1 && s.zoomBtnDisabled]}
-                  onPress={() => setZoom((z) => Math.min(1, +(z + 0.2).toFixed(2)))}
-                  disabled={zoom >= 1}
-                >
-                  <Text style={s.zoomBtnText}>＋</Text>
-                </Pressable>
-              </View>
-            )}
 
             {/* Manual Code Entry Button (Image 5 Center) */}
             <View style={s.scannerBottomArea}>
-              <Pressable
-                style={s.manualEntryBtn}
-                onPress={() => setShowManualInput(true)}
-              >
-                <Text style={s.manualMagnifier}>🔍</Text>
-                <Text style={s.manualEntryText}>Enter barcode or name manually</Text>
-              </Pressable>
+              {/* Scanned-items panel: what you've picked up + running total,
+                  with a button to open the full basket when done scanning. */}
+              {!!basket?.items?.length && (
+                <View style={s.scanBasketPanel}>
+                  {basket.items.slice(-3).map((it) => (
+                    <View key={it.productId} style={s.scanBasketRow}>
+                      <Text style={s.scanBasketName} numberOfLines={1}>
+                        {it.quantity} × {it.name}
+                      </Text>
+                      <Text style={s.scanBasketPrice}>
+                        {formatKes(it.unitPriceMinor * it.quantity)}
+                      </Text>
+                    </View>
+                  ))}
+                  {basket.items.length > 3 && (
+                    <Text style={s.scanBasketMore}>+{basket.items.length - 3} more…</Text>
+                  )}
+                  <View style={s.scanBasketTotalRow}>
+                    <Text style={s.scanBasketTotalLabel}>
+                      {basket.items.length} item{basket.items.length === 1 ? '' : 's'}
+                    </Text>
+                    <Text style={s.scanBasketTotal}>{formatKes(basket.totalMinor)}</Text>
+                  </View>
+                  <Pressable style={s.viewBasketBtn} onPress={() => setIsScannerOpen(false)}>
+                    <Text style={s.viewBasketText}>View scanned items →</Text>
+                  </Pressable>
+                </View>
+              )}
+
+              <View style={s.altScanRow}>
+                <Pressable
+                  style={s.altScanBtn}
+                  onPress={() => setShowManualInput(true)}
+                >
+                  <Text style={s.altScanIcon}>⌨</Text>
+                  <Text style={s.altScanText}>Type code</Text>
+                </Pressable>
+
+                <Pressable
+                  style={[s.altScanBtn, decodingPhoto && { opacity: 0.6 }]}
+                  disabled={decodingPhoto}
+                  onPress={() =>
+                    Alert.alert('Scan from photo', 'The camera is not locking on? Use a photo instead.', [
+                      { text: 'Take photo', onPress: () => scanFromPhoto('camera') },
+                      { text: 'Choose from gallery', onPress: () => scanFromPhoto('library') },
+                      { text: 'Cancel', style: 'cancel' },
+                    ])
+                  }
+                >
+                  <Text style={s.altScanIcon}>🖼</Text>
+                  <Text style={s.altScanText}>{decodingPhoto ? 'Reading…' : 'From photo'}</Text>
+                </Pressable>
+              </View>
 
               <Text style={s.scannerTip}>
-                {busy ? 'Scanning...' : 'Hold phone 10-15cm from barcode'}
+                {busy ? 'Scanning...' : lastScanLabel || 'Hold phone 10-15cm from barcode'}
               </Text>
+              {!!scanError && (
+                <Text style={s.scanErrorText} numberOfLines={3}>
+                  {scanError}
+                </Text>
+              )}
             </View>
           </View>
 
@@ -809,6 +1101,32 @@ const s = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 19,
   },
+  presenceError: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginHorizontal: 16,
+    marginBottom: 8,
+  },
+  presenceErrorText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#92400E',
+  },
+  presenceRetry: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#B45309',
+    marginLeft: 10,
+    textDecorationLine: 'underline',
+  },
   dockedBar: {
     position: 'absolute',
     bottom: 0,
@@ -903,16 +1221,48 @@ const s = StyleSheet.create({
   scannerOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'space-between',
-    paddingTop: Platform.OS === 'ios' ? 54 : 44,
-    paddingBottom: 40,
-    alignItems: 'center',
+    paddingHorizontal: 20,
   },
   scannerTopBar: {
-    width: '100%',
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
+  },
+  modeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    maxWidth: '55%',
+  },
+  modeDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#FBBF24',
+  },
+  modeDotScan: {
+    backgroundColor: '#4ADE80',
+  },
+  modeChipText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  scannerHeader: {
+    alignItems: 'center',
+    marginTop: 14,
+  },
+  scannerMiddle: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    paddingTop: 26,
   },
   scannerCloseBtn: {
     width: 44,
@@ -964,6 +1314,10 @@ const s = StyleSheet.create({
   viewfinderWrapper: {
     alignItems: 'center',
     justifyContent: 'center',
+    // Sits in the upper-middle of the screen — the rear camera is high on the
+    // phone, so the target zone lives where the lens naturally points, with
+    // the basket panel below it.
+    marginTop: 30,
   },
   viewfinder: {
     width: 260,
@@ -1020,6 +1374,94 @@ const s = StyleSheet.create({
     width: '100%',
     paddingHorizontal: 28,
   },
+  scanBasketPanel: {
+    width: '100%',
+    backgroundColor: 'rgba(15,23,42,0.82)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    padding: 12,
+    marginBottom: 12,
+  },
+  scanBasketRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 3,
+  },
+  scanBasketName: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#E2E8F0',
+    marginRight: 10,
+  },
+  scanBasketPrice: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#86EFAC',
+  },
+  scanBasketMore: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+  scanBasketTotalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.15)',
+    marginTop: 8,
+    paddingTop: 8,
+  },
+  scanBasketTotalLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  scanBasketTotal: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#4ADE80',
+  },
+  viewBasketBtn: {
+    marginTop: 10,
+    backgroundColor: '#16A34A',
+    borderRadius: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  viewBasketText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  altScanRow: {
+    flexDirection: 'row',
+    gap: 10,
+    width: '100%',
+  },
+  altScanBtn: {
+    flex: 1,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  altScanIcon: {
+    fontSize: 15,
+  },
+  altScanText: {
+    color: '#E2E8F0',
+    fontWeight: '700',
+    fontSize: 13,
+  },
   manualEntryBtn: {
     width: '100%',
     height: 48,
@@ -1044,6 +1486,14 @@ const s = StyleSheet.create({
     fontSize: 12,
     color: '#CBD5E1',
     marginTop: 12,
+  },
+  scanErrorText: {
+    fontSize: 12,
+    color: '#FCA5A5',
+    fontWeight: '700',
+    marginTop: 8,
+    textAlign: 'center',
+    paddingHorizontal: 16,
   },
   manualModalOverlay: {
     position: 'absolute',
@@ -1158,5 +1608,136 @@ const s = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 8,
     overflow: 'hidden',
+  },
+  listAddCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  listAddTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginBottom: 10,
+  },
+  listAddRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  listInput: {
+    flex: 1,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    fontSize: 14,
+    color: '#0F172A',
+  },
+  listAddBtn: {
+    backgroundColor: '#16A34A',
+    borderRadius: 12,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    justifyContent: 'center',
+  },
+  listAddBtnText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  suggestionList: {
+    marginTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    paddingTop: 4,
+  },
+  suggestionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 9,
+    paddingHorizontal: 4,
+  },
+  suggestionName: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#334155',
+  },
+  suggestionPrice: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#16A34A',
+    marginLeft: 10,
+  },
+  listItemCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    gap: 10,
+  },
+  listItemCardChecked: {
+    backgroundColor: '#F0FDF4',
+    borderColor: '#BBF7D0',
+  },
+  listCheck: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 2,
+    borderColor: '#CBD5E1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  listCheckDone: {
+    backgroundColor: '#16A34A',
+    borderColor: '#16A34A',
+  },
+  listCheckMark: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  listItemName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0F172A',
+  },
+  listItemNameChecked: {
+    color: '#64748B',
+    textDecorationLine: 'line-through',
+  },
+  listItemDone: {
+    fontSize: 11,
+    color: '#16A34A',
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  listRemoveBtn: {
+    padding: 6,
+  },
+  listRemoveText: {
+    color: '#94A3B8',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  clearCheckedBtn: {
+    alignSelf: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+  },
+  clearCheckedText: {
+    color: '#DC2626',
+    fontSize: 13,
+    fontWeight: '700',
   },
 });

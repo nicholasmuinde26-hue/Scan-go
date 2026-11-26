@@ -7,14 +7,21 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       port: 3000,
+      host: true,
+      strictPort: true,
       proxy: {
         '/api': {
-          // Defaults to the hosted Render API; set VITE_PROXY_TARGET=http://127.0.0.1:5000
-          // in .env.local to proxy to a locally-running backend instead.
-          target: env.VITE_PROXY_TARGET || 'https://scan-go-re1r.onrender.com',
+          // Defaults to locally-running backend on port 5000; set VITE_PROXY_TARGET
+          // in .env.local to point to a remote server (e.g. Render) if desired.
+          target: env.VITE_PROXY_TARGET || 'http://127.0.0.1:5000',
           changeOrigin: true,
-          secure: true,
+          secure: false,
         },
+      },
+      hmr: {
+        protocol: 'ws',
+        host: 'localhost',
+        clientPort: 3000,
       },
     },
   };

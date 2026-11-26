@@ -10,7 +10,8 @@ export type PresenceMethod =
   | 'STATIC_QR_GPS'
   | 'STATIC_QR_WIFI'
   | 'STATIC_QR_ONLY'
-  | 'STAFF_ISSUED_HANDHELD';
+  | 'STAFF_ISSUED_HANDHELD'
+  | 'KIOSK';
 
 export type SessionEndReason = 'PAID_AND_EXITED' | 'EXPIRED' | 'STAFF_ENDED' | 'REPLACED';
 
@@ -25,6 +26,11 @@ export interface IStoreSession extends Document {
   softSignals: { gps: boolean; wifi: boolean };
   status: 'ACTIVE' | 'ENDED';
   expiresAt: Date;
+  // Sliding-renewal bookkeeping: expiresAt moves forward on activity, but never
+  // past createdAt + SESSION_HARD_CAP_HOURS, so a session can't live forever.
+  ttlMinutes: number;
+  lastActivityAt?: Date;
+  activityCount: number;
   endedAt?: Date;
   endReason?: SessionEndReason;
   endedBy?: Types.ObjectId;
@@ -41,7 +47,7 @@ const storeSessionSchema = new Schema<IStoreSession>(
     trustTier: { type: Number, enum: [1, 2], required: true },
     presenceMethod: {
       type: String,
-      enum: ['ROTATING_QR', 'STATIC_QR_GPS', 'STATIC_QR_WIFI', 'STATIC_QR_ONLY', 'STAFF_ISSUED_HANDHELD'],
+      enum: ['ROTATING_QR', 'STATIC_QR_GPS', 'STATIC_QR_WIFI', 'STATIC_QR_ONLY', 'STAFF_ISSUED_HANDHELD', 'KIOSK'],
       required: true,
     },
     softSignals: {
@@ -50,6 +56,9 @@ const storeSessionSchema = new Schema<IStoreSession>(
     },
     status: { type: String, enum: ['ACTIVE', 'ENDED'], default: 'ACTIVE' },
     expiresAt: { type: Date, required: true },
+    ttlMinutes: { type: Number, required: true },
+    lastActivityAt: Date,
+    activityCount: { type: Number, default: 0 },
     endedAt: Date,
     endReason: { type: String, enum: ['PAID_AND_EXITED', 'EXPIRED', 'STAFF_ENDED', 'REPLACED'] },
     endedBy: { type: Schema.Types.ObjectId, ref: 'User' },

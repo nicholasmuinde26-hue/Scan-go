@@ -21,6 +21,13 @@ import {
   Sliders,
   DollarSign,
   Package,
+  Sparkles,
+  Copy,
+  Check,
+  Zap,
+  UserCheck,
+  UserPlus,
+  Loader2,
 } from 'lucide-react';
 import { Store, User, Product } from '../../types.js';
 import { apiRequest, formatKes } from '../../api.js';
@@ -72,8 +79,24 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
   const [invitePhone, setInvitePhone] = useState('');
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('BRANCH_MANAGER');
-  const [inviteStoreId, setInviteStoreId] = useState(currentStore._id);
+  const [inviteStoreId, setInviteStoreId] = useState(currentStore?._id || '');
   const [inviteManagedStoreIds, setInviteManagedStoreIds] = useState<string[]>([]);
+
+  // User lookup & Direct Staff Management state
+  const [checkingPhone, setCheckingPhone] = useState(false);
+  const [lookupUser, setLookupUser] = useState<any | null>(null);
+  const [lookupDone, setLookupDone] = useState(false);
+  const [customPassword, setCustomPassword] = useState('password123');
+  const [actionSuccessData, setActionSuccessData] = useState<{
+    title: string;
+    message: string;
+    phone?: string;
+    password?: string;
+    inviteLink?: string;
+    role?: string;
+    name?: string;
+  } | null>(null);
+  const [copiedText, setCopiedText] = useState(false);
 
   // New Store state
   const [storeName, setStoreName] = useState('');
@@ -85,7 +108,7 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
 
   // Load org staff
   const loadStaff = async () => {
-    if (!can(currentUser, 'staff:read')) return;
+    if (!can(currentUser, 'staff:read') || !currentStore?._id) return;
     try {
       setLoading(true);
       const res = await apiRequest(`/stores/${currentStore._id}/staff`);
@@ -100,19 +123,133 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
   };
 
   useEffect(() => {
-    loadStaff();
+    if (currentStore?._id) {
+      loadStaff();
+    }
     if (canAny(currentUser, ['finance:invoices:read', 'org:subscription:view'])) {
       apiRequest('/billing/invoices').then((r) => r?.success && setOrgInvoices(r.invoices || [])).catch(() => {});
     }
-  }, [currentStore._id]);
+  }, [currentStore?._id]);
 
-  const handleSendInvite = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const resetInviteModal = () => {
+    setInviteModalOpen(false);
+    setInviteName('');
+    setInvitePhone('');
+    setInviteEmail('');
+    setLookupUser(null);
+    setLookupDone(false);
+    setActionSuccessData(null);
+    setCopiedText(false);
+    setInviteManagedStoreIds([]);
+  };
+
+  const handleCheckPhone = async (phoneToCheck: string) => {
+    const clean = phoneToCheck.trim();
+    if (clean.length < 8) {
+      setLookupUser(null);
+      setLookupDone(false);
+      return;
+    }
+    try {
+      setCheckingPhone(true);
+      const res = await apiRequest(`/invites/lookup-phone?phone=${encodeURIComponent(clean)}`);
+      if (res?.exists && res?.user) {
+        setLookupUser(res.user);
+        setLookupDone(true);
+        if (!inviteName && res.user.name) setInviteName(res.user.name);
+        if (!inviteEmail && res.user.email) setInviteEmail(res.user.email);
+      } else {
+        setLookupUser(null);
+        setLookupDone(true);
+      }
+    } catch {
+      setLookupUser(null);
+      setLookupDone(false);
+    } finally {
+      setCheckingPhone(false);
+    }
+  };
+
+  const handlePromoteExistingUser = async () => {
     try {
       setLoading(true);
       const orgLevelRoles = ['FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR', 'GENERAL_MANAGER'];
       const isOrgLevel = orgLevelRoles.includes(inviteRole);
-      await apiRequest('/invites', {
+      const res = await apiRequest('/invites/promote-user', {
+        method: 'POST',
+        body: JSON.stringify({
+          phone: invitePhone.trim(),
+          role: inviteRole,
+          storeId: isOrgLevel ? undefined : inviteStoreId,
+          managedStoreIds: ['REGION_MANAGER', 'BRANCH_MANAGER'].includes(inviteRole) && inviteManagedStoreIds.length ? inviteManagedStoreIds : undefined,
+        }),
+      });
+
+      const memberName = res?.user?.name || lookupUser?.name || inviteName;
+      setActionSuccessData({
+        title: 'Staff Member Promoted Successfully! ⚡',
+        message: `${memberName} has been assigned to ${inviteRole}. They can now sign in at /staff with their phone number (${invitePhone.trim()}) and their existing account password.`,
+        phone: invitePhone.trim(),
+        role: inviteRole,
+        name: memberName,
+      });
+      setStatusMsg({ type: 'success', text: `${memberName} promoted to ${inviteRole} successfully.` });
+      if (currentStore?._id) {
+        loadStaff();
+      }
+    } catch (err: any) {
+      setStatusMsg({ type: 'error', text: err.message || 'Failed to promote user' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCreateDirectStaff = async () => {
+    try {
+      setLoading(true);
+      const orgLevelRoles = ['FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR', 'GENERAL_MANAGER'];
+      const isOrgLevel = orgLevelRoles.includes(inviteRole);
+      const passwordToUse = customPassword.trim() || 'password123';
+      const res = await apiRequest('/invites/create-direct', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: inviteName.trim(),
+          phone: invitePhone.trim(),
+          email: inviteEmail ? inviteEmail.trim() : undefined,
+          role: inviteRole,
+          storeId: isOrgLevel ? undefined : inviteStoreId,
+          managedStoreIds: ['REGION_MANAGER', 'BRANCH_MANAGER'].includes(inviteRole) && inviteManagedStoreIds.length ? inviteManagedStoreIds : undefined,
+          password: passwordToUse,
+        }),
+      });
+
+      const memberName = res?.user?.name || inviteName;
+      setActionSuccessData({
+        title: 'Staff Account Created Instantly! 🎉',
+        message: `Account activated for ${memberName} as ${inviteRole}. No email verification required!`,
+        phone: invitePhone.trim(),
+        password: passwordToUse,
+        role: inviteRole,
+        name: memberName,
+      });
+      setStatusMsg({ type: 'success', text: `Staff account for ${memberName} created successfully.` });
+      if (currentStore?._id) {
+        loadStaff();
+      }
+    } catch (err: any) {
+      setStatusMsg({ type: 'error', text: err.message || 'Failed to create staff account' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSendInvite = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    try {
+      setLoading(true);
+      const orgLevelRoles = ['FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR', 'GENERAL_MANAGER'];
+      const isOrgLevel = orgLevelRoles.includes(inviteRole);
+      const res = await apiRequest('/invites', {
         method: 'POST',
         body: JSON.stringify({
           name: inviteName,
@@ -123,15 +260,22 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
           managedStoreIds: ['REGION_MANAGER', 'BRANCH_MANAGER'].includes(inviteRole) && inviteManagedStoreIds.length ? inviteManagedStoreIds : undefined,
         }),
       });
-      setInviteManagedStoreIds([]);
-      setStatusMsg({ type: 'success', text: `Invitation sent to ${invitePhone || inviteEmail} successfully.` });
-      setInviteModalOpen(false);
-      setInviteName('');
-      setInvitePhone('');
-      setInviteEmail('');
-      loadStaff();
+
+      const fullLink = res?.inviteLink ? `${window.location.origin}${res.inviteLink}` : '';
+      setActionSuccessData({
+        title: 'Single-Use Invite Link Generated! 🔗',
+        message: `Invite generated for ${inviteName} (${inviteRole}). You can copy the link below and send it directly via SMS or WhatsApp.`,
+        inviteLink: fullLink,
+        phone: invitePhone,
+        role: inviteRole,
+        name: inviteName,
+      });
+      setStatusMsg({ type: 'success', text: `Invitation generated for ${invitePhone || inviteEmail}.` });
+      if (currentStore?._id) {
+        loadStaff();
+      }
     } catch (err: any) {
-      setStatusMsg({ type: 'error', text: err.message || 'Failed to send invite' });
+      setStatusMsg({ type: 'error', text: err.message || 'Failed to generate invite' });
     } finally {
       setLoading(false);
     }
@@ -618,141 +762,363 @@ export const OrgAdminDashboard: React.FC<OrgAdminDashboardProps> = ({
         </div>
       )}
 
-      {/* Invite Modal */}
+      {/* Add or Promote Staff Modal */}
       {inviteModalOpen && (
         <div className="fixed inset-0 bg-navy-800/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-3xl p-6 max-w-md w-full border border-slate-200 shadow-2xl space-y-5">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-navy-800 text-base">Invite Staff Member</h3>
-              <button onClick={() => setInviteModalOpen(false)} className="text-slate-400 hover:text-slate-700 text-lg">
+          <div className="bg-white rounded-3xl p-6 max-w-lg w-full border border-slate-200 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="font-bold text-navy-800 text-base">
+                  {actionSuccessData ? 'Staff Action Completed' : 'Add or Promote Staff Member'}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {actionSuccessData
+                    ? 'Staff permissions and workspace assignment have been updated.'
+                    : 'Check phone number to promote an existing user, or create a staff account directly.'}
+                </p>
+              </div>
+              <button onClick={resetInviteModal} className="text-slate-400 hover:text-slate-700 text-xl font-bold p-1">
                 ×
               </button>
             </div>
 
-            <form onSubmit={handleSendInvite} className="space-y-4 text-xs">
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">Full Name</label>
-                <input
-                  type="text"
-                  placeholder="Staff member's full name"
-                  value={inviteName}
-                  onChange={(e) => setInviteName(e.target.value)}
-                  className="w-full border border-slate-200 rounded-xl p-3 focus:outline-brand-500"
-                  required
-                />
-              </div>
+            {actionSuccessData ? (
+              <div className="space-y-4 py-2">
+                <div className="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 mx-auto flex items-center justify-center">
+                  <CheckCircle2 className="w-7 h-7" />
+                </div>
+                <div className="text-center space-y-1">
+                  <h4 className="font-black text-navy-900 text-sm">{actionSuccessData.title}</h4>
+                  <p className="text-xs text-slate-600">{actionSuccessData.message}</p>
+                </div>
 
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">Phone Number (M-Pesa registered)</label>
-                <input
-                  type="text"
-                  placeholder="Enter staff phone number"
-                  value={invitePhone}
-                  onChange={(e) => setInvitePhone(e.target.value)}
-                  className="w-full border border-slate-200 rounded-xl p-3 focus:outline-brand-500"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">Email Address</label>
-                <input
-                  type="email"
-                  placeholder="staff@yourstore.co.ke"
-                  value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  className="w-full border border-slate-200 rounded-xl p-3 focus:outline-brand-500"
-                />
-              </div>
-
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">Assigned Role</label>
-                <select
-                  value={inviteRole}
-                  onChange={(e) => setInviteRole(e.target.value)}
-                  className="w-full border border-slate-200 rounded-xl p-3 bg-white font-semibold text-navy-700"
-                >
-                  <optgroup label="Management">
-                    <option value="GENERAL_MANAGER">General Manager</option>
-                    <option value="REGION_MANAGER">Region Manager</option>
-                  </optgroup>
-                  <optgroup label="Branch & Staff">
-                  <option value="BRANCH_MANAGER">Branch Manager</option>
-                  <option value="STOCK_CONTROLLER">Stock Controller</option>
-                  <option value="SUPERVISOR">Store Floor Supervisor</option>
-                  <option value="PICKER">Order Picker</option>
-                  <option value="PACKER_VERIFIER">Packer Verifier</option>
-                  <option value="EXIT_OFFICER">Exit Gate Officer</option>
-                  <option value="CASHIER_CUSTOMER_SERVICE">Cashier / Helpdesk</option>
-                  <option value="DELIVERY_COLLECTION_HANDOVER">Collection Handover Desk</option>
-                  </optgroup>
-                  <optgroup label="Organization specialists">
-                    <option value="FINANCE_OFFICER">Finance Officer</option>
-                    <option value="CATALOGUE_INVENTORY_MANAGER">Catalogue & Inventory Manager</option>
-                    <option value="MARKETING_MANAGER">Marketing Manager</option>
-                    <option value="LOSS_PREVENTION_MANAGER">Loss Prevention Manager</option>
-                    <option value="ORG_AUDITOR">Organization Auditor</option>
-                  </optgroup>
-                </select>
-              </div>
-
-              {!['FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR', 'GENERAL_MANAGER'].includes(inviteRole) && (
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">Target Branch Location</label>
-                <select
-                  value={inviteStoreId}
-                  onChange={(e) => setInviteStoreId(e.target.value)}
-                  className="w-full border border-slate-200 rounded-xl p-3 bg-white font-semibold text-navy-700"
-                >
-                  {stores.map((s) => (
-                    <option key={s._id} value={s._id}>
-                      {s.name} ({s.code})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              )}
-
-              {['REGION_MANAGER', 'BRANCH_MANAGER'].includes(inviteRole) && stores.length > 1 && (
-                <div>
-                  <label className="font-bold text-slate-700 block mb-1">
-                    {inviteRole === 'REGION_MANAGER' ? 'Branches this region oversees (required)' : 'Additional branches this manager oversees (optional)'}
-                  </label>
-                  <div className="max-h-36 overflow-y-auto border border-slate-200 rounded-xl p-2 space-y-1 bg-slate-50">
-                    {stores.map((s) => (
-                      <label key={s._id} className="flex items-center gap-2 text-xs text-navy-800">
-                        <input
-                          type="checkbox"
-                          checked={inviteManagedStoreIds.includes(s._id)}
-                          onChange={(e) => setInviteManagedStoreIds((prev) => e.target.checked ? [...prev, s._id] : prev.filter((id) => id !== s._id))}
-                        />
-                        {s.name}
-                      </label>
-                    ))}
+                {actionSuccessData.password && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-left space-y-2.5 text-xs">
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider">Staff Sign-In Credentials</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-white p-2.5 rounded-xl border border-slate-200">
+                        <span className="text-slate-400 block text-[10px] font-bold">Staff Phone:</span>
+                        <span className="font-mono font-bold text-navy-800 text-xs">{actionSuccessData.phone}</span>
+                      </div>
+                      <div className="bg-white p-2.5 rounded-xl border border-slate-200">
+                        <span className="text-slate-400 block text-[10px] font-bold">Initial Password:</span>
+                        <span className="font-mono font-bold text-navy-800 text-xs">{actionSuccessData.password}</span>
+                      </div>
+                    </div>
+                    <div className="bg-white p-2.5 rounded-xl border border-slate-200">
+                      <span className="text-slate-400 block text-[10px] font-bold">Staff Login Portal:</span>
+                      <span className="font-mono text-azure-600 font-bold text-xs">{window.location.origin}/staff</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(`Scan & Go Staff Login:\nPhone: ${actionSuccessData.phone}\nPassword: ${actionSuccessData.password}\nLogin at: ${window.location.origin}/staff`);
+                        setCopiedText(true);
+                        setTimeout(() => setCopiedText(false), 2500);
+                      }}
+                      className="w-full mt-2 py-2.5 bg-navy-800 text-white rounded-xl font-bold flex items-center justify-center space-x-2 text-xs hover:bg-navy-900"
+                    >
+                      {copiedText ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                      <span>{copiedText ? 'Credentials Copied!' : 'Copy Credentials (for WhatsApp / SMS)'}</span>
+                    </button>
                   </div>
-                  {inviteRole === 'REGION_MANAGER' && inviteManagedStoreIds.length === 0 && (
-                    <p className="text-[10px] text-amber-600 mt-1 font-semibold">Select at least one branch.</p>
+                )}
+
+                {actionSuccessData.inviteLink && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-left space-y-2 text-xs">
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider">Single-Use Invite Link</div>
+                    <input
+                      type="text"
+                      readOnly
+                      value={actionSuccessData.inviteLink}
+                      className="w-full border border-slate-200 rounded-xl p-2.5 bg-white text-navy-800 font-mono text-xs select-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(actionSuccessData.inviteLink || '');
+                        setCopiedText(true);
+                        setTimeout(() => setCopiedText(false), 2500);
+                      }}
+                      className="w-full py-2.5 bg-brand-600 text-white rounded-xl font-bold flex items-center justify-center space-x-2 text-xs hover:bg-brand-700"
+                    >
+                      {copiedText ? <Check className="w-4 h-4 text-emerald-300" /> : <Copy className="w-4 h-4" />}
+                      <span>{copiedText ? 'Invite Link Copied!' : 'Copy Link (for WhatsApp / SMS)'}</span>
+                    </button>
+                  </div>
+                )}
+
+                <div className="pt-2 text-center">
+                  <button
+                    type="button"
+                    onClick={resetInviteModal}
+                    className="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-navy-800 rounded-xl font-bold text-xs"
+                  >
+                    Done & Return to Directory
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={(e) => e.preventDefault()} className="space-y-4 text-xs">
+                {/* Phone Input with Live Status */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-bold text-slate-700">Phone Number (M-Pesa registered)</label>
+                    {checkingPhone && (
+                      <span className="flex items-center gap-1 text-[10px] text-azure-600 font-bold">
+                        <Loader2 className="w-3 h-3 animate-spin" /> Checking...
+                      </span>
+                    )}
+                    {!checkingPhone && lookupUser && (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-black flex items-center gap-1">
+                        <UserCheck className="w-3 h-3 text-emerald-600" /> User In System
+                      </span>
+                    )}
+                    {!checkingPhone && lookupDone && !lookupUser && (
+                      <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold">
+                        New User
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="e.g. 0712345678"
+                      value={invitePhone}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setInvitePhone(val);
+                        if (val.trim().length >= 8) {
+                          handleCheckPhone(val);
+                        } else {
+                          setLookupUser(null);
+                          setLookupDone(false);
+                        }
+                      }}
+                      onBlur={() => {
+                        if (invitePhone.trim().length >= 4) {
+                          handleCheckPhone(invitePhone);
+                        }
+                      }}
+                      className="w-full border border-slate-200 rounded-xl p-3 focus:outline-brand-500 font-mono text-xs"
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleCheckPhone(invitePhone)}
+                      disabled={checkingPhone || !invitePhone.trim()}
+                      className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs shrink-0"
+                    >
+                      Check
+                    </button>
+                  </div>
+                </div>
+
+                {/* Found User Banner */}
+                {lookupUser && (
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <div className="w-7 h-7 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold text-xs">
+                          {lookupUser.name ? lookupUser.name.charAt(0).toUpperCase() : 'U'}
+                        </div>
+                        <div>
+                          <div className="font-bold text-emerald-950 text-xs flex items-center gap-1.5">
+                            <span>{lookupUser.name}</span>
+                            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-emerald-200/80 text-emerald-900 font-black">
+                              {lookupUser.role}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-emerald-700">
+                            {lookupUser.phone} {lookupUser.email ? `• ${lookupUser.email}` : ''}
+                          </div>
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 text-[9px] font-black uppercase tracking-wider rounded-md bg-emerald-600 text-white">
+                        Found
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-emerald-800 leading-relaxed">
+                      ⚡ <strong>Direct Promotion Ready:</strong> This person is already registered in the system. Select their new role and branch below and click <strong>Promote Directly</strong>. No email invite is needed—they can sign in immediately at <span className="font-mono font-bold">/staff</span> using their current password!
+                    </p>
+                  </div>
+                )}
+
+                {/* Full Name */}
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">Full Name</label>
+                  <input
+                    type="text"
+                    placeholder="Staff member's full name"
+                    value={inviteName}
+                    onChange={(e) => setInviteName(e.target.value)}
+                    className="w-full border border-slate-200 rounded-xl p-3 focus:outline-brand-500"
+                    required
+                  />
+                </div>
+
+                {/* Email Address (Optional) */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-bold text-slate-700">Email Address</label>
+                    <span className="text-[10px] text-slate-400">Optional</span>
+                  </div>
+                  <input
+                    type="email"
+                    placeholder="staff@yourstore.co.ke"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                    className="w-full border border-slate-200 rounded-xl p-3 focus:outline-brand-500"
+                  />
+                </div>
+
+                {/* Assigned Role */}
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">Assigned Role</label>
+                  <select
+                    value={inviteRole}
+                    onChange={(e) => setInviteRole(e.target.value)}
+                    className="w-full border border-slate-200 rounded-xl p-3 bg-white font-semibold text-navy-700"
+                  >
+                    <optgroup label="Management">
+                      <option value="GENERAL_MANAGER">General Manager</option>
+                      <option value="REGION_MANAGER">Region Manager</option>
+                    </optgroup>
+                    <optgroup label="Branch Staff">
+                      <option value="BRANCH_MANAGER">Branch Manager</option>
+                      <option value="STOCK_CONTROLLER">Stock Controller</option>
+                      <option value="SUPERVISOR">Store Floor Supervisor</option>
+                      <option value="PICKER">Order Picker</option>
+                      <option value="PACKER_VERIFIER">Packer Verifier</option>
+                      <option value="EXIT_OFFICER">Exit Gate Officer</option>
+                      <option value="CASHIER_CUSTOMER_SERVICE">Cashier / Helpdesk</option>
+                      <option value="DELIVERY_COLLECTION_HANDOVER">Collection Handover Desk</option>
+                    </optgroup>
+                    <optgroup label="Organization Specialists">
+                      <option value="FINANCE_OFFICER">Finance Officer</option>
+                      <option value="CATALOGUE_INVENTORY_MANAGER">Catalogue & Inventory Manager</option>
+                      <option value="MARKETING_MANAGER">Marketing Manager</option>
+                      <option value="LOSS_PREVENTION_MANAGER">Loss Prevention Manager</option>
+                      <option value="ORG_AUDITOR">Organization Auditor</option>
+                    </optgroup>
+                  </select>
+                </div>
+
+                {/* Target Branch Location */}
+                {!['FINANCE_OFFICER', 'CATALOGUE_INVENTORY_MANAGER', 'MARKETING_MANAGER', 'LOSS_PREVENTION_MANAGER', 'ORG_AUDITOR', 'GENERAL_MANAGER'].includes(inviteRole) && (
+                  <div>
+                    <label className="font-bold text-slate-700 block mb-1">Target Branch Location</label>
+                    <select
+                      value={inviteStoreId}
+                      onChange={(e) => setInviteStoreId(e.target.value)}
+                      className="w-full border border-slate-200 rounded-xl p-3 bg-white font-semibold text-navy-700"
+                    >
+                      {stores.map((s) => (
+                        <option key={s._id} value={s._id}>
+                          {s.name} ({s.code})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Region / Multi-Branch Oversight */}
+                {['REGION_MANAGER', 'BRANCH_MANAGER'].includes(inviteRole) && stores.length > 1 && (
+                  <div>
+                    <label className="font-bold text-slate-700 block mb-1">
+                      {inviteRole === 'REGION_MANAGER' ? 'Branches this region oversees (required)' : 'Additional branches this manager oversees (optional)'}
+                    </label>
+                    <div className="max-h-36 overflow-y-auto border border-slate-200 rounded-xl p-2 space-y-1 bg-slate-50">
+                      {stores.map((s) => (
+                        <label key={s._id} className="flex items-center gap-2 text-xs text-navy-800">
+                          <input
+                            type="checkbox"
+                            checked={inviteManagedStoreIds.includes(s._id)}
+                            onChange={(e) => setInviteManagedStoreIds((prev) => e.target.checked ? [...prev, s._id] : prev.filter((id) => id !== s._id))}
+                          />
+                          {s.name}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Custom Password when creating a new user */}
+                {!lookupUser && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="font-bold text-slate-700">Initial Staff Password</label>
+                      <span className="text-[10px] text-slate-400">Default: password123</span>
+                    </div>
+                    <input
+                      type="text"
+                      value={customPassword}
+                      onChange={(e) => setCustomPassword(e.target.value)}
+                      placeholder="e.g. password123"
+                      className="w-full border border-slate-200 rounded-xl p-2.5 bg-white text-navy-800 font-mono text-xs focus:outline-brand-500"
+                    />
+                    <p className="text-[10px] text-slate-500">
+                      For new staff: creates their login directly with this password so you can share it immediately without relying on email delivery.
+                    </p>
+                  </div>
+                )}
+
+                {/* Action Buttons */}
+                <div className="pt-2">
+                  {lookupUser ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={resetInviteModal}
+                        className="px-4 py-2.5 border border-slate-200 rounded-xl text-slate-600 font-bold hover:bg-slate-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handlePromoteExistingUser}
+                        disabled={loading}
+                        className="flex-1 py-2.5 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 shadow-sm flex items-center justify-center space-x-2 text-xs"
+                      >
+                        <Zap className="w-4 h-4 fill-current text-amber-300" />
+                        <span>{loading ? 'Promoting...' : `Promote & Assign ${lookupUser.name} Directly`}</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={resetInviteModal}
+                          className="px-4 py-2.5 border border-slate-200 rounded-xl text-slate-600 font-bold hover:bg-slate-50"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCreateDirectStaff}
+                          disabled={loading || !inviteName.trim() || !invitePhone.trim()}
+                          className="flex-1 py-2.5 bg-brand-600 text-white rounded-xl font-bold hover:bg-brand-700 shadow-sm flex items-center justify-center space-x-1.5 text-xs disabled:opacity-50"
+                        >
+                          <UserPlus className="w-4 h-4" />
+                          <span>{loading ? 'Creating...' : 'Create Staff Directly (No Email Needed)'}</span>
+                        </button>
+                      </div>
+                      <div className="text-center">
+                        <button
+                          type="button"
+                          onClick={handleSendInvite}
+                          disabled={loading || !inviteName.trim() || !invitePhone.trim()}
+                          className="text-[11px] font-bold text-azure-600 hover:text-azure-800 hover:underline"
+                        >
+                          Or generate an invite link instead
+                        </button>
+                      </div>
+                    </div>
                   )}
                 </div>
-              )}
-
-              <div className="pt-2 flex items-center justify-end space-x-2">
-                <button
-                  type="button"
-                  onClick={() => setInviteModalOpen(false)}
-                  className="px-4 py-2.5 border border-slate-200 rounded-xl text-slate-600 font-bold hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="px-4 py-2.5 bg-brand-600 text-white rounded-xl font-bold hover:bg-brand-700 shadow-xs"
-                >
-                  {loading ? 'Sending...' : 'Send Single-Use Invite'}
-                </button>
-              </div>
-            </form>
+              </form>
+            )}
           </div>
         </div>
       )}

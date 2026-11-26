@@ -136,6 +136,7 @@ export const ForgotPasswordPage: React.FC = () => {
                 <label className="text-xs font-bold text-slate-700 block mb-1">6-Digit Verification OTP</label>
                 <input
                   type="text"
+                  autoComplete="one-time-code"
                   required
                   maxLength={6}
                   placeholder="123456"

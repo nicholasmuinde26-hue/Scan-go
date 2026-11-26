@@ -3,6 +3,12 @@ import { Types } from 'mongoose';
 import Store, { IStore, IPresenceTierPolicy } from '../stores/store.model.js';
 import EntryPoint from './entry-point.model.js';
 import StoreSession, { IStoreSession, PresenceMethod, SessionEndReason } from './store-session.model.js';
+import Basket from '../baskets/basket.model.js';
+
+/** Absolute ceiling on a session's life, however much the shopper keeps scanning. */
+export const SESSION_HARD_CAP_HOURS = 12;
+/** Minimum gap between expiry-extension writes for the same session. */
+const TOUCH_THROTTLE_MS = 60 * 1000;
 
 export class PresenceError extends Error {
   status: number;
@@ -173,6 +179,41 @@ async function expireStale(filter: Record<string, any>) {
   );
 }
 
+/**
+ * Record shopper activity on a session and slide its expiry forward.
+ * expiresAt becomes now + ttlMinutes, capped at createdAt + SESSION_HARD_CAP_HOURS.
+ * Writes are throttled to once per TOUCH_THROTTLE_MS per session, so a burst of
+ * scans costs at most one write per minute. Safe to call for missing/ended
+ * sessions — it is a no-op then.
+ */
+export async function touchSession(sessionId: string | Types.ObjectId): Promise<void> {
+  try {
+    const session = await StoreSession.findOne({ _id: sessionId, status: 'ACTIVE' })
+      .select('ttlMinutes createdAt lastActivityAt expiresAt')
+      .lean();
+    if (!session) return;
+
+    const now = new Date();
+    const lastActivity = session.lastActivityAt ? new Date(session.lastActivityAt).getTime() : 0;
+    if (now.getTime() - lastActivity < TOUCH_THROTTLE_MS) return;
+
+    const ttlMinutes = session.ttlMinutes || 180;
+    const hardCap = new Date(new Date(session.createdAt).getTime() + SESSION_HARD_CAP_HOURS * 60 * 60 * 1000);
+    const sliding = new Date(now.getTime() + ttlMinutes * 60 * 1000);
+    const expiresAt = sliding < hardCap ? sliding : hardCap;
+    // Never shorten an expiry that is already later (e.g. created just now).
+    const finalExpiry = expiresAt > new Date(session.expiresAt) ? expiresAt : session.expiresAt;
+
+    await StoreSession.updateOne(
+      { _id: sessionId, status: 'ACTIVE' },
+      { $set: { lastActivityAt: now, expiresAt: finalExpiry }, $inc: { activityCount: 1 } }
+    );
+  } catch (error) {
+    // Activity tracking must never break a scan.
+    console.error('[presence] touchSession failed:', error);
+  }
+}
+
 export interface StartSessionInput {
   userId: string;
   code: unknown;
@@ -225,6 +266,9 @@ export async function startSession(input: StartSessionInput): Promise<{ session:
     presenceMethod: method,
     softSignals: signals,
     status: 'ACTIVE',
+    ttlMinutes: policy.sessionTtlMinutes,
+    lastActivityAt: new Date(),
+    activityCount: 0,
     expiresAt: new Date(Date.now() + policy.sessionTtlMinutes * 60 * 1000),
   });
 
@@ -236,14 +280,73 @@ export async function getActiveSession(userId: string, storeId?: string): Promis
   await expireStale({ userId });
   const filter: Record<string, any> = { userId, status: 'ACTIVE', expiresAt: { $gt: new Date() } };
   if (storeId) filter.storeId = storeId;
-  return StoreSession.findOne(filter);
+  const session = await StoreSession.findOne(filter);
+  // Reading the session is shopper activity (the app polls this while in store);
+  // keep the visit alive while they are actually using it.
+  if (session) void touchSession(session._id);
+  return session;
 }
 
-export async function endSession(sessionId: string | Types.ObjectId, reason: SessionEndReason, endedBy?: string): Promise<void> {
-  await StoreSession.updateOne(
+/**
+ * The only legal transition out of ACTIVE is ENDED. The update is guarded on
+ * status:'ACTIVE', so calling this twice (or racing with the janitor) is a
+ * no-op the second time. Returns true when this call performed the transition.
+ */
+export async function transitionSession(
+  sessionId: string | Types.ObjectId,
+  reason: SessionEndReason,
+  endedBy?: string
+): Promise<boolean> {
+  const result = await StoreSession.updateOne(
     { _id: sessionId, status: 'ACTIVE' },
     { $set: { status: 'ENDED', endedAt: new Date(), endReason: reason, ...(endedBy ? { endedBy } : {}) } }
   );
+  return result.modifiedCount > 0;
+}
+
+export async function endSession(sessionId: string | Types.ObjectId, reason: SessionEndReason, endedBy?: string): Promise<void> {
+  await transitionSession(sessionId, reason, endedBy);
+}
+
+/**
+ * Expire every stale ACTIVE session and abandon the OPEN baskets that were
+ * attached to them — a basket whose session died can never be scanned again,
+ * so leaving it OPEN forever just litters the database. Runs in batches so a
+ * backlog after downtime can't lock the collection.
+ */
+export async function sweepExpiredSessions(batchSize = 500): Promise<{ expired: number; basketsAbandoned: number }> {
+  const stale = await StoreSession.find({ status: 'ACTIVE', expiresAt: { $lte: new Date() } })
+    .select('_id')
+    .limit(batchSize)
+    .lean();
+  if (!stale.length) return { expired: 0, basketsAbandoned: 0 };
+
+  const ids = stale.map((s) => s._id);
+  const result = await StoreSession.updateMany(
+    { _id: { $in: ids }, status: 'ACTIVE' },
+    { $set: { status: 'ENDED', endedAt: new Date(), endReason: 'EXPIRED' } }
+  );
+  const baskets = await Basket.updateMany(
+    { storeSessionId: { $in: ids }, status: 'OPEN' },
+    { $set: { status: 'ABANDONED' } }
+  );
+  return { expired: result.modifiedCount, basketsAbandoned: baskets.modifiedCount };
+}
+
+/** Periodic janitor: closes expired sessions even when nobody touches them. */
+export function startPresenceJanitor(intervalMs = 60 * 1000): void {
+  const tick = () => {
+    sweepExpiredSessions()
+      .then(({ expired, basketsAbandoned }) => {
+        if (expired || basketsAbandoned) {
+          console.log(`[presence] janitor expired ${expired} session(s), abandoned ${basketsAbandoned} basket(s)`);
+        }
+      })
+      .catch((error) => console.error('[presence] janitor failed:', error));
+  };
+  tick();
+  const timer = setInterval(tick, intervalMs);
+  timer.unref();
 }
 
 /** Called when an order leaves the store. Safe to call more than once and for orders with no session. */

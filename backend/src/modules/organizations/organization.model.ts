@@ -1,4 +1,5 @@
 import { Schema, model, Document } from 'mongoose';
+import Store from '../stores/store.model.js';
 
 // An Organization is a "workspace": one supermarket company (e.g. Naivas) that owns many store branches.
 export enum OrganizationStatus {
@@ -36,6 +37,8 @@ export interface IOrganization extends Document {
 
 const organizationSchema = new Schema<IOrganization>(
   {
+    // existing fields ...
+
     name: { type: String, required: true, trim: true },
     slug: { type: String, required: true, unique: true, index: true },
     status: { type: String, enum: Object.values(OrganizationStatus), default: OrganizationStatus.ACTIVE, index: true },
@@ -64,5 +67,18 @@ const organizationSchema = new Schema<IOrganization>(
   },
   { timestamps: true }
 );
+
+// Post‑save hook – ensure every organization has at least one default branch
+organizationSchema.post('save', async function (doc) {
+  const existing = await Store.findOne({ organizationId: doc._id }).lean();
+  if (!existing) {
+    await Store.create({
+      name: 'Default Branch',
+      code: `DEF-${doc.slug}`,
+      location: 'Headquarters',
+      organizationId: doc._id,
+    });
+  }
+});
 
 export default model<IOrganization>('Organization', organizationSchema);

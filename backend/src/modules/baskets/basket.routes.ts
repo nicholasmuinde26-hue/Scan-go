@@ -1,13 +1,10 @@
 import { Router } from 'express';
 import Basket from './basket.model.js';
 import Product from '../products/product.model.js';
-import { UnknownBarcode } from '../products/inventory-record.model.js';
 import Store from '../stores/store.model.js';
-import WeighLabel from './weigh-label.model.js';
 import SerializedTag from './serialized-tag.model.js';
-import { verifyVariableMeasureLabel } from './variableMeasureBarcode.js';
 import { authenticate, AuthRequest, canAccessStore, requirePermission } from '../../middleware/auth.js';
-import { generateBasketHash } from '../../shared/utils/crypto.js';
+import { applyProductScan, recalculateBasket, BasketOpError } from './basket.service.js';
 import { rejectIfSubscriptionBlocked, requireSubscriptionGate } from '../../middleware/subscriptionGate.js';
 import StoreSession from '../presence/store-session.model.js';
 import { resolvePolicy, getActiveSession, checkTierLimits, ResolvedPresencePolicy } from '../presence/presence.service.js';
@@ -29,37 +26,6 @@ router.post('/tags/register', authenticate, requirePermission('inventory:write')
     return res.status(error.code === 11000 ? 409 : 400).json({ success: false, error: error.code === 11000 ? 'This tag serial is already registered.' : error.message });
   }
 });
-
-// Helper to recalculate server-authoritative basket totals and basket hash
-function recalculateBasket(basket: any) {
-  let totalMinor = 0;
-  let totalItems = 0;
-  let expectedWeightGrams = 0;
-
-  for (const item of basket.items) {
-    totalMinor += item.unitPriceMinor * item.quantity;
-    totalItems += item.quantity;
-    if (item.weightGrams) {
-      expectedWeightGrams += item.weightGrams * item.quantity;
-    }
-  }
-
-  basket.totalMinor = totalMinor;
-  basket.totalItems = totalItems;
-  basket.expectedWeightGrams = expectedWeightGrams;
-  basket.basketHash = generateBasketHash(
-    basket.items.map((i: any) => ({
-      productId: i.productId.toString(),
-      quantity: i.quantity,
-      unitPriceMinor: i.unitPriceMinor,
-      weightGrams: i.weightGrams,
-      labelBarcode: (i as any).labelBarcode,
-      scaleId: (i as any).scaleId,
-      tagSerial: (i as any).tagSerial,
-    }))
-  );
-  basket.lastActivityAt = new Date();
-}
 
 async function isBasketWriteBlocked(basket: any, res: any): Promise<boolean> {
   const store = await Store.findById(basket.storeId).select('organizationId');
@@ -97,16 +63,6 @@ async function requireLiveSession(basket: any, res: any): Promise<ResolvedPresen
     return null;
   }
   return policy;
-}
-
-/** Throws an error the route's catch block turns into a 409 (so earlier side effects are cleaned up). */
-function assertWithinTierLimits(basket: any, policy: ResolvedPresencePolicy) {
-  const message = checkTierLimits(policy, basket.trustTier, { totalMinor: basket.totalMinor, totalItems: basket.totalItems });
-  if (message) {
-    const err: any = new Error(message);
-    err.tierLimit = true;
-    throw err;
-  }
 }
 
 // Get or create active shopping basket for customer
@@ -162,17 +118,12 @@ router.post('/', authenticate, requireSubscriptionGate('scan_and_go'), async (re
   }
 });
 
-// Scan product or enter manual barcode
+// Scan product or enter manual barcode.
+// The heavy lifting lives in basket.service.applyProductScan so the customer
+// app and registered devices (smart baskets, lane scanners) share one path.
 router.post('/:id/scan', authenticate, async (req: AuthRequest, res) => {
-  let consumedWeighLabel: string | undefined;
-  let claimedTagSerial: string | undefined;
   try {
-    const { barcode, isManualEntry, quantity = 1, tagSerial: rawTagSerial } = req.body;
-    const normalizedQuantity = Number(quantity);
-    if (!barcode || !Number.isInteger(normalizedQuantity) || normalizedQuantity < 1 || normalizedQuantity > 100) {
-      res.status(400).json({ success: false, error: 'A barcode and integer quantity from 1 to 100 are required.' });
-      return;
-    }
+    const { barcode, isManualEntry, quantity = 1, tagSerial } = req.body;
     const basket = await Basket.findById(req.params.id);
 
     if (!basket || basket.customerId.toString() !== req.user?.id) {
@@ -180,193 +131,25 @@ router.post('/:id/scan', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    if (basket.status !== 'OPEN') {
-      res.status(400).json({ success: false, error: 'Basket is locked or converted.' });
-      return;
-    }
     if (await isBasketWriteBlocked(basket, res)) return;
     const presencePolicy = await requireLiveSession(basket, res);
     if (!presencePolicy) return;
 
-    const scannedBarcode = String(barcode || '').trim();
-    const store = await Store.findById(basket.storeId).select('code variableMeasureBarcode');
-    const measureLayout = store?.variableMeasureBarcode;
-    if (store && measureLayout?.enabled && measureLayout.prefix && scannedBarcode.startsWith(measureLayout.prefix)) {
-      const product = await Product.findOne({ storeId: basket.storeId, active: true, soldBy: 'weight', pluCode: scannedBarcode.slice(measureLayout.pluStart, measureLayout.pluStart + measureLayout.pluLength) });
-      let verified;
-      try {
-        verified = verifyVariableMeasureLabel(scannedBarcode, measureLayout as any, store.code, product);
-      } catch (error: any) {
-        res.status(400).json({ success: false, code: 'INVALID_WEIGH_LABEL', error: error.message });
-        return;
-      }
-      if (Number(quantity) !== 1) {
-        res.status(400).json({ success: false, error: 'Each produce label represents one weighed bag; quantity must be one.' });
-        return;
-      }
-      if (basket.items.some((item: any) => item.labelBarcode === scannedBarcode) || await WeighLabel.exists({ barcode: scannedBarcode })) {
-        res.status(409).json({ success: false, code: 'WEIGH_LABEL_ALREADY_USED', error: 'This produce label has already been used.' });
-        return;
-      }
-      const label = await WeighLabel.create({
-        barcode: scannedBarcode,
-        storeId: basket.storeId,
-        scaleId: verified.scaleId,
-        productId: product!._id,
-        basketId: basket._id,
-        firstSeenAt: new Date(),
-        weightGrams: verified.weightGrams,
-        priceMinor: verified.priceMinor,
-      });
-      consumedWeighLabel = scannedBarcode;
-      basket.events.push({ eventType: isManualEntry ? 'MANUAL_ENTRY' : 'SCAN', barcode: scannedBarcode, productId: product!._id, quantity: 1, timestamp: new Date(), details: `Weighed produce label scanned from ${verified.scaleId}.` });
-      basket.items.push({
-        productId: product!._id,
-        barcode: product!.barcode,
-        name: product!.name,
-        quantity: 1,
-        unitPriceMinor: verified.priceMinor,
-        priceVersion: product!.priceVersion,
-        weightGrams: verified.weightGrams,
-        isWeighted: true,
-        highTheft: product!.highTheft,
-        labelBarcode: scannedBarcode,
-        unitPriceAtScan: verified.unitPriceAtScan,
-        scaleId: verified.scaleId,
-        addedAt: new Date(),
-      });
-      recalculateBasket(basket);
-      assertWithinTierLimits(basket, presencePolicy);
-      await basket.save();
-      consumedWeighLabel = undefined;
-      res.json({ success: true, scannedProduct: product, verification: { kind: 'WEIGHED', labelBarcode: label.barcode, weightGrams: verified.weightGrams, priceMinor: verified.priceMinor, scaleId: verified.scaleId }, basket });
-      return;
-    }
-
-    // Lookup product using server-side authoritative price
-    const product = await Product.findOne({ storeId: basket.storeId, active: true, $or: [{ barcode: scannedBarcode }, { barcodeAliases: scannedBarcode }, { pluCode: scannedBarcode }] });
-
-    if (!product) {
-      // Track unknown barcode scan for risk scoring!
-      basket.unknownBarcodeCount += 1;
-      basket.events.push({
-        eventType: 'UNKNOWN_BARCODE',
-        barcode,
-        timestamp: new Date(),
-        details: `Customer scanned unregistered barcode ${barcode}`,
-      });
-      await basket.save();
-
-      const now = new Date();
-      await UnknownBarcode.findOneAndUpdate(
-        { storeId: basket.storeId, barcode: String(barcode), status: 'OPEN' },
-        { $set: { lastSeenAt: now, source: 'CUSTOMER_SCAN', reportedBy: req.user?.id, reportedByName: req.user?.name }, $setOnInsert: { storeId: basket.storeId, barcode: String(barcode), status: 'OPEN', firstSeenAt: now }, $inc: { seenCount: 1 } },
-        { upsert: true }
-      );
-
-      res.status(404).json({
-        success: false,
-        error: `Unrecognized barcode [${barcode}]. Staff assistance required.`,
-        unknownBarcodeCount: basket.unknownBarcodeCount,
-        flaggedForInventoryReview: true,
-      });
-      return;
-    }
-
-    if (product.soldBy === 'weight') {
-      res.status(409).json({ success: false, code: 'WEIGH_LABEL_REQUIRED', error: 'Scan the variable-measure label printed by the store scale for this produce.' });
-      return;
-    }
-
-    const tagSerial = rawTagSerial ? String(rawTagSerial).trim() : '';
-    if (product.requiresSerializedTag && !tagSerial) {
-      res.status(409).json({ success: false, code: 'TAG_REQUIRED', productId: product._id, productName: product.name, error: 'Scan or enter this item’s serialized tag before adding it.' });
-      return;
-    }
-    if (!product.requiresSerializedTag && tagSerial) {
-      res.status(400).json({ success: false, error: 'This product does not require a serialized tag.' });
-      return;
-    }
-    if (product.requiresSerializedTag && Number(quantity) !== 1) {
-      res.status(400).json({ success: false, error: 'Tagged items and weighed produce labels must be added one at a time.' });
-      return;
-    }
-    if (tagSerial) {
-      const claimed = await SerializedTag.findOneAndUpdate(
-        { tagSerial, storeId: basket.storeId, productId: product._id, status: 'IN_STORE' },
-        { $set: { status: 'IN_BASKET', basketId: basket._id } },
-        { new: true }
-      );
-      if (!claimed) {
-        res.status(409).json({ success: false, code: 'TAG_UNAVAILABLE', error: 'Tag is unknown, belongs to another product/store, or is already in use.' });
-        return;
-      }
-      claimedTagSerial = tagSerial;
-    }
-
-    // Log event
-    if (isManualEntry) {
-      basket.manualEntryCount += 1;
-      basket.events.push({
-        eventType: 'MANUAL_ENTRY',
-        barcode,
-        productId: product._id,
-        quantity: normalizedQuantity,
-        timestamp: new Date(),
-        details: `Manual barcode entered: ${barcode}`,
-      });
-    } else {
-      basket.events.push({
-        eventType: 'SCAN',
-        barcode,
-        productId: product._id,
-        quantity: normalizedQuantity,
-        timestamp: new Date(),
-        details: `Barcode scanned: ${barcode}`,
-      });
-    }
-
-    // Check if item is already in basket
-    const existingIndex = product.soldBy === 'unit' && !product.requiresSerializedTag
-      ? basket.items.findIndex(i => i.productId.toString() === product._id.toString() && !(i as any).labelBarcode && !(i as any).tagSerial)
-      : -1;
-    if (existingIndex > -1) {
-      basket.items[existingIndex].quantity += normalizedQuantity;
-    } else {
-      basket.items.push({
-        productId: product._id,
-        barcode: product.barcode,
-        name: product.name,
-        quantity: normalizedQuantity,
-        unitPriceMinor: product.priceMinor,
-        priceVersion: product.priceVersion,
-        weightGrams: product.weightGrams,
-        isWeighted: product.isWeighted,
-        highTheft: product.highTheft,
-        tagSerial: tagSerial || undefined,
-        addedAt: new Date(),
-      });
-    }
-
-    recalculateBasket(basket);
-    assertWithinTierLimits(basket, presencePolicy);
-    await basket.save();
-    claimedTagSerial = undefined;
-
-    res.json({
-      success: true,
-      scannedProduct: product,
+    const result = await applyProductScan(
       basket,
-    });
-  } catch (error: any) {
-    if (consumedWeighLabel) await WeighLabel.deleteOne({ barcode: consumedWeighLabel, basketId: req.params.id }).catch(() => {});
-    if (claimedTagSerial) await SerializedTag.updateOne({ tagSerial: claimedTagSerial, basketId: req.params.id, status: 'IN_BASKET' }, { $set: { status: 'IN_STORE' }, $unset: { basketId: 1 } }).catch(() => {});
-    if (error.tierLimit) {
-      res.status(409).json({ success: false, code: 'TIER_LIMIT_REACHED', error: error.message });
+      { barcode, quantity, isManualEntry: !!isManualEntry, tagSerial },
+      presencePolicy,
+      { reportedBy: req.user?.id, reportedByName: req.user?.name, source: 'APP' },
+    );
+
+    if (result.kind === 'WEIGHED') {
+      res.json({ success: true, scannedProduct: result.product, verification: result.verification, basket: result.basket });
       return;
     }
-    if (error.code === 11000) {
-      res.status(409).json({ success: false, code: 'WEIGH_LABEL_ALREADY_USED', error: 'This produce label has already been used.' });
+    res.json({ success: true, scannedProduct: result.product, basket: result.basket });
+  } catch (error: any) {
+    if (error instanceof BasketOpError) {
+      res.status(error.status).json({ success: false, code: error.code, error: error.message, ...(error.data || {}) });
       return;
     }
     res.status(500).json({ success: false, error: error.message });
@@ -440,6 +223,21 @@ router.patch('/:id/items/:productId', authenticate, async (req: AuthRequest, res
     }
     await basket.save();
 
+    res.json({ success: true, basket });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Fetch a single basket (owner only) — used by the app to reload basket state
+// on checkout/review screens.
+router.get('/:id', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const basket = await Basket.findById(req.params.id);
+    if (!basket || basket.customerId.toString() !== req.user?.id) {
+      res.status(404).json({ success: false, error: 'Basket not found.' });
+      return;
+    }
     res.json({ success: true, basket });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

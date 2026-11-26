@@ -134,7 +134,7 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
         headers,
         credentials: 'include',
       });
-      const retryData = await retryRes.json();
+      const retryData = await retryRes.json().catch(() => ({}));
       if (!retryRes.ok) {
         // A freshly-minted token was still rejected — the session is dead.
         // Clear it and notify the app so it returns to login instead of looping.
@@ -148,6 +148,10 @@ export async function apiRequest<T = any>(endpoint: string, options: RequestInit
         throw error;
       }
       return retryData;
+    } else {
+      // Refresh token is missing or expired — session is dead.
+      clearToken();
+      window.dispatchEvent(new Event('scango:session-expired'));
     }
   }
 

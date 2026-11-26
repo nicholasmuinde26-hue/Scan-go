@@ -119,6 +119,8 @@ export type Permission =
   // Customer success
   | 'cs:usage:view'
   | 'cs:trials:manage'
+  // Point of sale
+  | 'pos:operate'
   // Legacy permissions (for backward compatibility)
   | 'reports:export'
   | 'system:admin';
@@ -482,6 +484,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'discrepancy:resolve',
     'supervisor:override',
     'supervisor:approve',
+    'pos:operate',
     'fraud:view',
     'fraud:config',
     'inventory:read',
@@ -512,14 +515,16 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'orders:read:store',
     'discrepancy:resolve',
     'supervisor:override',
+    'pos:operate',
     'audit:read',
     // NO pricing edits or staff management
   ],
 
   CASHIER_CUSTOMER_SERVICE: [
-    // Refunds and customer helpdesk actions only; no exit-lane or handover duties.
+    // Refunds, customer helpdesk, and the cashier till (scan/adjust/checkout baskets).
     'orders:read:store',
     'orders:refund',
+    'pos:operate',
     'support:reset_password',
     'support:resend_receipt',
     // NO overrides or discrepancy resolution
@@ -585,6 +590,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'orders:handover',
     'discrepancy:resolve',
     'supervisor:override',
+    'pos:operate',
     'fraud:view',
     'fraud:config',
     'pricing:read',

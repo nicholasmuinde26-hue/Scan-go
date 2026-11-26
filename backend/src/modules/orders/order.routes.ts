@@ -18,6 +18,7 @@ import AuditLog from '../audits/audit.model.js';
 import Approval, { ApprovalType, ApprovalStatus } from '../approvals/approval.model.js';
 import { broadcastEvent } from '../../shared/utils/eventStream.js';
 import { rejectIfSubscriptionBlocked, requireSubscriptionGate } from '../../middleware/subscriptionGate.js';
+import { checkoutBasketToOrder, CheckoutError } from './order.service.js';
 
 const router = Router();
 
@@ -48,150 +49,13 @@ router.post('/checkout-basket', authenticate, async (req: AuthRequest, res) => {
     }
     if (await isStoreOperationBlocked(basket.storeId, res, 'scan_and_go')) return;
 
-    if (basket.items.length === 0) {
-      res.status(400).json({ success: false, error: 'Cannot checkout an empty basket.' });
-      return;
-    }
-
-    // Recalculate authoritative server prices at time of checkout
-    let authoritativeTotalMinor = 0;
-    let authoritativeWeightGrams = 0;
-    const orderItems = [];
-
-    for (const item of basket.items) {
-      const product = await Product.findById(item.productId);
-      if (!product || !product.active) {
-        res.status(400).json({ success: false, error: `Product ${item.name} is no longer available.` });
-        return;
-      }
-
-      const basketLine = item as any;
-      if (basketLine.labelBarcode && (product.soldBy !== 'weight' || product.pricePerKgMinor !== basketLine.unitPriceAtScan || !basketLine.weightGrams)) {
-        res.status(409).json({ success: false, code: 'WEIGHED_PRICE_CHANGED', error: `Rescan the produce label for ${item.name}; its catalogue price per kg changed.` });
-        return;
-      }
-      if (basketLine.labelBarcode) {
-        const label = await WeighLabel.findOne({ barcode: basketLine.labelBarcode, storeId: basket.storeId, basketId: basket._id, productId: product._id, weightGrams: basketLine.weightGrams, priceMinor: basketLine.unitPriceMinor });
-        if (!label) {
-          res.status(409).json({ success: false, code: 'WEIGH_LABEL_INVALID', error: `The produce label for ${item.name} is no longer valid.` });
-          return;
-        }
-      }
-      if (basketLine.tagSerial) {
-        const tag = await SerializedTag.findOne({ tagSerial: basketLine.tagSerial, storeId: basket.storeId, productId: product._id, basketId: basket._id, status: 'IN_BASKET' });
-        if (!tag) {
-          res.status(409).json({ success: false, code: 'SERIAL_TAG_INVALID', error: `The serialized tag for ${item.name} is no longer reserved to this basket.` });
-          return;
-        }
-      }
-      const lineTotalMinor = basketLine.labelBarcode ? basketLine.unitPriceMinor : product.priceMinor * item.quantity;
-      authoritativeTotalMinor += lineTotalMinor;
-      if (basketLine.labelBarcode) {
-        authoritativeWeightGrams += basketLine.weightGrams;
-      } else if (product.weightGrams) {
-        authoritativeWeightGrams += product.weightGrams * item.quantity;
-      }
-
-      orderItems.push({
-        productId: product._id,
-        productName: product.name,
-        barcode: product.barcode,
-        quantity: item.quantity,
-        unitPriceMinor: basketLine.labelBarcode ? basketLine.unitPriceMinor : product.priceMinor,
-        lineTotalMinor,
-        priceVersion: product.priceVersion,
-        weightGrams: basketLine.labelBarcode ? basketLine.weightGrams : product.weightGrams,
-        isWeighted: product.isWeighted,
-        highTheft: product.highTheft,
-        labelBarcode: basketLine.labelBarcode,
-        unitPriceAtScan: basketLine.unitPriceAtScan,
-        scaleId: basketLine.scaleId,
-        tagSerial: basketLine.tagSerial,
-      });
-    }
-
-    const orderNumber = generateOrderNumber('SG');
-    const basketHash = generateBasketHash(
-      orderItems.map(i => ({
-        productId: i.productId.toString(),
-        quantity: i.quantity,
-        unitPriceMinor: i.unitPriceMinor,
-        weightGrams: i.weightGrams,
-        labelBarcode: i.labelBarcode,
-        scaleId: i.scaleId,
-        tagSerial: i.tagSerial,
-      }))
-    );
-
-    const order = await Order.create({
-      orderNumber,
-      orderType: 'SCAN_AND_GO',
-      storeId: basket.storeId,
-      customerId: req.user?.id,
-      basketId: basket._id,
-      // Carry the in-store presence tier to the exit check.
-      storeSessionId: basket.storeSessionId,
-      trustTier: basket.trustTier,
-      presenceMethod: basket.presenceMethod,
-      items: orderItems,
-      totalMinor: authoritativeTotalMinor,
-      totalItems: basket.totalItems,
-      expectedWeightGrams: authoritativeWeightGrams,
-      basketHash,
-      status: 'PAYMENT_PENDING',
-      statusHistory: [
-        {
-          status: 'PAYMENT_PENDING',
-          changedAt: new Date(),
-          changedBy: req.user?.id as any,
-          note: 'Customer initiated checkout for Scan & Go',
-        },
-      ],
-      lockedAt: new Date(),
-    });
-
-    await SerializedTag.updateMany({ basketId: basket._id, status: 'IN_BASKET' }, { $set: { orderId: order._id } });
-
-    basket.status = 'CONVERTED';
-    await basket.save();
-
-    await AuditLog.create({
-      actorId: req.user?.id,
-      actorRole: req.user?.role,
-      actorName: req.user?.name,
-      action: 'CHECKOUT_ORDER',
-      entityType: 'ORDER',
-      entityId: order._id.toString(),
-      storeId: order.storeId,
-      newValue: { orderNumber: order.orderNumber, totalMinor: order.totalMinor },
-    });
-
-    broadcastEvent({
-      type: 'order.created',
-      payload: {
-        orderId: order._id,
-        orderNumber: order.orderNumber,
-        orderType: order.orderType,
-        totalMinor: order.totalMinor,
-      },
-      storeId: order.storeId.toString(),
-    });
-
-    broadcastEvent({
-      type: 'order.created',
-      payload: {
-        orderId: order._id,
-        orderNumber: order.orderNumber,
-        orderType: order.orderType,
-        pickupSlot: order.pickupSlot,
-        totalMinor: order.totalMinor,
-      },
-      storeId: order.storeId.toString(),
-      targetRoles: ['PICKER', 'SUPERVISOR', 'STORE_MANAGER'],
-    });
-
+    const order = await checkoutBasketToOrder(basket, { id: req.user?.id, role: req.user?.role, name: req.user?.name });
     res.status(201).json({ success: true, order });
   } catch (error: any) {
+    if (error instanceof CheckoutError) {
+      res.status(error.status).json({ success: false, code: error.code, error: error.message, ...(error.data || {}) });
+      return;
+    }
     res.status(500).json({ success: false, error: error.message });
   }
 });

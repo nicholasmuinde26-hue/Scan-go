@@ -420,7 +420,19 @@ export async function queryDarajaStkStatus(checkoutRequestId: string): Promise<D
     if (res.status === 401) cachedAuthToken = null;
 
     const resultCode = data.ResultCode !== undefined && data.ResultCode !== '' ? Number(data.ResultCode) : undefined;
-    const isCompleted = resultCode !== undefined && !Number.isNaN(resultCode);
+
+    // stkpushquery answers with NON-FINAL ResultCodes while the customer is still
+    // deciding (or when Daraja rate-limits us). Treating those as a completed
+    // transaction failed real payments — observed live: ResultCode 17
+    // "Rule limited" and in-flight responses surfaced as ResultDesc
+    // "The transaction is still under processing".
+    const TRANSIENT_RESULT_CODES = new Set([17]); // 17 = rule limited (query throttled)
+    const desc = String(data.ResultDesc || data.errorMessage || data.ResponseDescription || '');
+    const looksInFlight =
+      !!data.errorCode ||
+      TRANSIENT_RESULT_CODES.has(resultCode ?? -1) ||
+      /being processed|still under processing|rule limited|try again/i.test(desc);
+    const isCompleted = resultCode !== undefined && !Number.isNaN(resultCode) && !looksInFlight;
 
     return {
       success: isCompleted && resultCode === 0,

@@ -21,12 +21,14 @@ import {
   Building2,
   Calendar,
   QrCode,
+  Radio,
 } from 'lucide-react';
 import { Store, User, Product } from '../../types.js';
 import { apiRequest, formatKes } from '../../api.js';
 import { useLiveOrderEvents } from '../../hooks/useLiveOrderEvents.js';
 import { can } from '../../permissions.js';
 import { EntryPosterManager } from './EntryPosterManager.js';
+import { DeviceManagerPanel } from './DeviceManagerPanel.js';
 
 interface BranchManagerDashboardProps {
   currentStore: Store;
@@ -34,7 +36,7 @@ interface BranchManagerDashboardProps {
   products: Product[];
 }
 
-type BranchTab = 'TODAY' | 'ROSTER' | 'APPROVALS' | 'FRAUD_CONFIG' | 'STORE_POSTERS' | 'STOCK_ALERTS' | 'EOD_RECON';
+type BranchTab = 'TODAY' | 'ROSTER' | 'APPROVALS' | 'FRAUD_CONFIG' | 'STORE_POSTERS' | 'DEVICES' | 'STOCK_ALERTS' | 'EOD_RECON';
 
 export const BranchManagerDashboard: React.FC<BranchManagerDashboardProps> = ({
   currentStore,
@@ -48,6 +50,7 @@ export const BranchManagerDashboard: React.FC<BranchManagerDashboardProps> = ({
     { id: 'APPROVALS', label: 'Approvals Queue', icon: CheckCircle2, permission: 'supervisor:approve' },
     { id: 'FRAUD_CONFIG', label: 'Branch Fraud Config', icon: ShieldAlert, permission: 'fraud:config' },
     { id: 'STORE_POSTERS', label: 'Store Check-in Posters', icon: QrCode, permission: 'fraud:config' },
+    { id: 'DEVICES', label: 'Retail Devices', icon: Radio, permission: 'stores:manage' },
     { id: 'STOCK_ALERTS', label: 'Stock Alerts', icon: Boxes, permission: 'inventory:read' },
     { id: 'EOD_RECON', label: 'End-of-Day Reconciliation', icon: FileCheck2, permission: 'reports:export' },
   ];
@@ -103,7 +106,7 @@ export const BranchManagerDashboard: React.FC<BranchManagerDashboardProps> = ({
       if (rosterRes?.roster) setRoster(rosterRes.roster);
 
       // 3. Approvals
-      const approvalsRes = await apiRequest('/approvals/pending');
+      const approvalsRes = await apiRequest(`/approvals/store/${currentStore._id}/pending`);
       if (approvalsRes?.approvals) setApprovals(approvalsRes.approvals);
 
       // 4. Low stock
@@ -558,6 +561,10 @@ export const BranchManagerDashboard: React.FC<BranchManagerDashboardProps> = ({
 
       {activeTab === 'STORE_POSTERS' && (
         <EntryPosterManager storeId={currentStore._id} storeName={currentStore.name} canManage={canEditFraud} />
+      )}
+
+      {activeTab === 'DEVICES' && (
+        <DeviceManagerPanel currentStore={currentStore} />
       )}
 
       {/* Tab 5: Stock Alerts */}

@@ -577,7 +577,8 @@ router.post('/refresh', async (req: Request, res: Response) => {
 // -------------------------------------------------------------
 router.post('/logout', async (req: Request, res: Response) => {
   try {
-    const rawCookie = req.cookies?.tusk_refresh_token;
+    // Refresh token may arrive via httpOnly cookie OR request body (mobile app).
+    const rawCookie = req.body?.refreshToken || req.cookies?.tusk_refresh_token;
     if (rawCookie && rawCookie.includes(':')) {
       const [sessionId] = rawCookie.split(':');
       await User.updateOne(
@@ -600,6 +601,43 @@ router.post('/logout-all', authenticate, async (req: AuthRequest, res: Response)
     await User.updateOne({ _id: req.user?.id }, { $set: { sessions: [] } });
     clearRefreshTokenCookie(res);
     res.json({ success: true, message: 'Signed out of all devices successfully.' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------------------------------------------
+// 6b. Push Notification Device Tokens (mobile app)
+// -------------------------------------------------------------
+router.post('/device-token', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const token = String(req.body?.token || '').trim();
+    if (!token || token.length > 512) {
+      res.status(400).json({ success: false, error: 'A valid device token is required.' });
+      return;
+    }
+    await User.updateOne(
+      { _id: req.user!.id },
+      { $addToSet: { deviceTokens: token } }
+    );
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.delete('/device-token', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const token = String(req.body?.token || '').trim();
+    if (!token) {
+      res.status(400).json({ success: false, error: 'A device token is required.' });
+      return;
+    }
+    await User.updateOne(
+      { _id: req.user!.id },
+      { $pull: { deviceTokens: token } }
+    );
+    res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }

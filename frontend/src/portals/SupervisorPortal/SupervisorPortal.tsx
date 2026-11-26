@@ -18,7 +18,9 @@ import {
   TrendingDown,
   ChevronRight,
   Store as StoreIcon,
+  LineChart,
 } from 'lucide-react';
+import { DemandForecastView } from './DemandForecastView.js';
 import { Store, Product, User } from '../../types.js';
 import { apiRequest, formatKes } from '../../api.js';
 import { useLiveOrderEvents } from '../../hooks/useLiveOrderEvents.js';
@@ -34,7 +36,7 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
   currentUser,
   products,
 }) => {
-  const [activeTab, setActiveTab] = useState<'ESCALATIONS' | 'RESOLVE' | 'AUDIT_LOG' | 'STAFF'>('ESCALATIONS');
+  const [activeTab, setActiveTab] = useState<'ESCALATIONS' | 'RESOLVE' | 'AUDIT_LOG' | 'STAFF' | 'FORECAST'>('ESCALATIONS');
   const [escalations, setEscalations] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [selectedEscalation, setSelectedEscalation] = useState<any | null>(null);
@@ -249,6 +251,18 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
         >
           <Users className="w-4 h-4" />
           <span>Staff on Duty</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('FORECAST')}
+          className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+            activeTab === 'FORECAST'
+              ? 'bg-navy-600 text-white shadow-sm'
+              : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
+          }`}
+        >
+          <LineChart className="w-4 h-4" />
+          <span>Demand & Forecast</span>
         </button>
       </div>
 
@@ -590,6 +604,9 @@ export const SupervisorPortal: React.FC<SupervisorPortalProps> = ({
           </div>
         </div>
       )}
+
+      {/* TAB 5: DEMAND & FORECAST */}
+      {activeTab === 'FORECAST' && <DemandForecastView currentStore={currentStore} />}
     </div>
   );
 };

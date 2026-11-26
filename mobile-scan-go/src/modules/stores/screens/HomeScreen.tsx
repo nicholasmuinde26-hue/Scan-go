@@ -1,7 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
   Dimensions,
   FlatList,
   Modal,
@@ -15,9 +13,8 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTopInset, useBottomInset } from '../../../core/safeArea';
 import * as Haptics from 'expo-haptics';
-import { useCustomer } from '../../auth';
 import { useStores } from '../hooks';
 import { currentStore } from '../store';
 import { useCollectCart } from '../../cart/store';
@@ -41,14 +38,12 @@ const PASTEL_COLORS = [
 ];
 
 export default function HomeScreen() {
-  const insets = useSafeAreaInsets();
+
   const [store, setStore] = useState<Store | null>(null);
   const [showStorePicker, setShowStorePicker] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [favorites, setFavorites] = useState<Record<string, boolean>>({});
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
 
-  const customer = useCustomer();
   const storesQuery = useStores();
   const cartLines = useCollectCart((state) => state.lines);
   const addCartLine = useCollectCart((state) => state.add);
@@ -60,8 +55,8 @@ export default function HomeScreen() {
   });
 
   const cartUnits = cartLines.reduce((n, i) => n + i.quantity, 0);
-  const topHeaderPadding = Math.max(insets.top, Platform.OS === 'android' ? 28 : 20) + 12;
-  const bottomScrollPadding = Math.max(insets.bottom, 20) + 90;
+  const topHeaderPadding = useTopInset(12);
+  const bottomScrollPadding = useBottomInset(90);
 
   const liveProducts = productsQuery.data?.products || [];
 
@@ -132,11 +127,6 @@ export default function HomeScreen() {
     notify(`Added to Cart: ${product.name} added to your basket.`, 'info');
   };
 
-  const toggleFavorite = (id: string) => {
-    setFavorites((prev) => ({ ...prev, [id]: !prev[id] }));
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-  };
-
   const handleCategoryPress = (categoryName: string) => {
     router.push({
       pathname: '/(tabs)/shop',
@@ -177,28 +167,20 @@ export default function HomeScreen() {
         </View>
 
         {/* Search Input Bar */}
-        <View style={s.searchRow}>
-          <View style={s.searchInputWrapper}>
-            <Text style={s.searchMagnifier}>🔍</Text>
-            <TextInput
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              placeholder="Search store, products..."
-              placeholderTextColor="#94A3B8"
-              style={s.searchInput}
-            />
-            {searchQuery.length > 0 && (
-              <Pressable onPress={() => setSearchQuery('')}>
-                <Text style={s.clearSearch}>✕</Text>
-              </Pressable>
-            )}
-          </View>
-          <Pressable
-            style={s.filterBtn}
-            onPress={() => router.push('/(tabs)/shop')}
-          >
-            <Text style={s.filterIcon}>⚙</Text>
-          </Pressable>
+        <View style={s.searchInputWrapper}>
+          <Text style={s.searchMagnifier}>🔍</Text>
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search products..."
+            placeholderTextColor="#94A3B8"
+            style={s.searchInput}
+          />
+          {searchQuery.length > 0 && (
+            <Pressable onPress={() => setSearchQuery('')}>
+              <Text style={s.clearSearch}>✕</Text>
+            </Pressable>
+          )}
         </View>
       </View>
 
@@ -208,26 +190,6 @@ export default function HomeScreen() {
         contentContainerStyle={[s.scrollContent, { paddingBottom: bottomScrollPadding }]}
         showsVerticalScrollIndicator={false}
       >
-        {/* Hero Banner Strip */}
-        <View style={s.heroBanner}>
-          <View style={s.heroTextArea}>
-            <View style={s.organicTag}>
-              <Text style={s.organicTagText}>REAL-TIME INVENTORY</Text>
-            </View>
-            <Text style={s.heroTitle}>Fresh Stock at{'\n'}{store?.name?.split('-')[0] || 'Store'}</Text>
-            <Text style={s.heroSubtitle}>Browse live products or scan barcodes in aisles</Text>
-            <Pressable
-              style={s.heroButton}
-              onPress={() => router.push('/(tabs)/shop')}
-            >
-              <Text style={s.heroButtonText}>Browse Catalog →</Text>
-            </Pressable>
-          </View>
-          <View style={s.heroArt}>
-            <Text style={s.heroEmoji}>🛒🥦</Text>
-          </View>
-        </View>
-
         {/* In-Store Scan & Go Fast Pass Card */}
         <View style={s.scanFastCard}>
           <View style={s.scanFastLeft}>
@@ -292,11 +254,13 @@ export default function HomeScreen() {
           })}
         </View>
 
-        {/* Exclusive Offers Horizontal List (Live Data from Database) */}
+        {/* Featured Products rail (live catalog, capped for a tidy preview) */}
         <View style={[s.sectionHeader, { marginTop: 24 }]}>
-          <Text style={s.sectionTitle}>Store Products ({liveProducts.length})</Text>
+          <Text style={s.sectionTitle}>
+            {store ? `Popular at ${store.name.split('-')[0]}` : 'Store products'}
+          </Text>
           <Pressable onPress={() => router.push('/(tabs)/shop')}>
-            <Text style={s.seeAllText}>View all</Text>
+            <Text style={s.seeAllText}>See all</Text>
           </Pressable>
         </View>
 
@@ -317,7 +281,7 @@ export default function HomeScreen() {
             <Text style={s.emptyProductsSub}>
               {searchQuery
                 ? `No items match "${searchQuery}".`
-                : 'This store has no active products listed yet. Tap "Change" below to switch branches.'}
+                : 'This store has no active products listed yet. Tap the store name above to switch branches.'}
             </Text>
           </View>
         ) : (
@@ -326,26 +290,23 @@ export default function HomeScreen() {
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={s.horizontalProducts}
           >
-            {liveProducts.map((prod) => (
+            {liveProducts.slice(0, 12).map((prod) => (
               <Pressable
                 key={prod._id}
                 style={s.productCard}
                 onPress={() => setSelectedProduct(prod)}
               >
-                {/* Favorite button */}
-                <Pressable
-                  style={s.favoriteBtn}
-                  onPress={() => toggleFavorite(prod._id)}
-                >
-                  <Text style={s.favoriteIcon}>
-                    {favorites[prod._id] ? '❤️' : '🤍'}
-                  </Text>
-                </Pressable>
-
                 {/* Product Thumbnail using live image or smart emoji */}
                 <View style={s.productThumb}>
+                  {prod.compareAtPriceMinor && prod.compareAtPriceMinor > prod.priceMinor && (
+                    <View style={s.dealBadge}>
+                      <Text style={s.dealBadgeText}>
+                        -{Math.round((1 - prod.priceMinor / prod.compareAtPriceMinor) * 100)}%
+                      </Text>
+                    </View>
+                  )}
                   <ProductVisual
-                    image={prod.image}
+                    image={prod.image || (prod._id ? `${(process.env.EXPO_PUBLIC_API_URL || '').replace(/\/api\/v1$/, '')}/api/v1/products/${prod._id}/image` : undefined)}
                     name={prod.name}
                     category={prod.category}
                     size={84}
@@ -368,9 +329,14 @@ export default function HomeScreen() {
 
                 {/* Bottom row: Price and Add button */}
                 <View style={s.productBottomRow}>
-                  <Text style={s.productPrice}>
-                    KES {((prod.priceMinor / 100)).toFixed(2)}
-                  </Text>
+                  <View>
+                    {prod.compareAtPriceMinor && prod.compareAtPriceMinor > prod.priceMinor && (
+                      <Text style={s.productWas}>KES {(prod.compareAtPriceMinor / 100).toFixed(2)}</Text>
+                    )}
+                    <Text style={s.productPrice}>
+                      KES {((prod.priceMinor / 100)).toFixed(2)}
+                    </Text>
+                  </View>
                   <Pressable
                     style={s.addBtn}
                     onPress={(e) => {
@@ -386,48 +352,6 @@ export default function HomeScreen() {
           </ScrollView>
         )}
 
-        {/* Stores to Help You Save (Branch Switcher) */}
-        <View style={[s.sectionHeader, { marginTop: 24 }]}>
-          <Text style={s.sectionTitle}>Stores to help you save</Text>
-          <Pressable onPress={() => setShowStorePicker(true)}>
-            <Text style={s.seeAllText}>Change</Text>
-          </Pressable>
-        </View>
-
-        {storesQuery.data?.stores?.map((st) => (
-          <Pressable
-            key={st._id}
-            style={[s.storeSaveCard, store?._id === st._id && s.storeSaveSelected]}
-            onPress={() => selectStore(st)}
-          >
-            <View style={s.storeSaveIcon}>
-              <Text style={{ fontSize: 24 }}>🏬</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <View style={s.storeSaveTitleRow}>
-                <Text style={s.storeSaveName}>{st.name}</Text>
-                {store?._id === st._id && (
-                  <View style={s.currentPill}>
-                    <Text style={s.currentPillText}>Active Store</Text>
-                  </View>
-                )}
-              </View>
-              <Text style={s.storeSaveMeta}>
-                ⚡ Open today · {st.location?.city || 'Nairobi'}
-              </Text>
-              <View style={s.tagsRow}>
-                <View style={s.inStorePill}>
-                  <Text style={s.inStorePillText}>In-store price</Text>
-                </View>
-                {st.shopAndCollectAvailable && (
-                  <View style={s.collectPill}>
-                    <Text style={s.collectPillText}>Shop & Collect</Text>
-                  </View>
-                )}
-              </View>
-            </View>
-          </Pressable>
-        ))}
       </ScrollView>
 
       {/* Product Detail Modal */}
@@ -618,11 +542,6 @@ const s = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
   },
-  searchRow: {
-    flexDirection: 'row',
-    gap: 10,
-    alignItems: 'center',
-  },
   searchInputWrapper: {
     flex: 1,
     height: 48,
@@ -646,81 +565,12 @@ const s = StyleSheet.create({
     color: '#94A3B8',
     padding: 4,
   },
-  filterBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.25)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  filterIcon: {
-    fontSize: 20,
-    color: '#FFFFFF',
-  },
   scrollView: {
     flex: 1,
   },
   scrollContent: {
     paddingHorizontal: 18,
     paddingTop: 18,
-  },
-  heroBanner: {
-    backgroundColor: '#DCFCE7',
-    borderRadius: 24,
-    padding: 20,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderWidth: 1,
-    borderColor: '#BBF7D0',
-    overflow: 'hidden',
-  },
-  heroTextArea: {
-    flex: 1,
-  },
-  organicTag: {
-    backgroundColor: '#16A34A',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-    alignSelf: 'flex-start',
-    marginBottom: 6,
-  },
-  organicTagText: {
-    color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  heroTitle: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: '#0F172A',
-    lineHeight: 26,
-  },
-  heroSubtitle: {
-    fontSize: 12,
-    color: '#475569',
-    marginTop: 4,
-    marginBottom: 12,
-  },
-  heroButton: {
-    backgroundColor: '#15803D',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 12,
-    alignSelf: 'flex-start',
-  },
-  heroButtonText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  heroArt: {
-    paddingLeft: 10,
-  },
-  heroEmoji: {
-    fontSize: 44,
   },
   scanFastCard: {
     backgroundColor: '#FFFFFF',
@@ -863,15 +713,6 @@ const s = StyleSheet.create({
     borderColor: '#E2E8F0',
     position: 'relative',
   },
-  favoriteBtn: {
-    position: 'absolute',
-    top: 10,
-    right: 10,
-    zIndex: 2,
-  },
-  favoriteIcon: {
-    fontSize: 16,
-  },
   productThumb: {
     height: 90,
     alignItems: 'center',
@@ -904,6 +745,26 @@ const s = StyleSheet.create({
     fontWeight: '800',
     color: '#15803D',
   },
+  productWas: {
+    fontSize: 10,
+    color: '#94A3B8',
+    textDecorationLine: 'line-through',
+  },
+  dealBadge: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    zIndex: 2,
+    backgroundColor: '#DC2626',
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  dealBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+  },
   addBtn: {
     width: 32,
     height: 32,
@@ -917,82 +778,6 @@ const s = StyleSheet.create({
     fontSize: 18,
     fontWeight: '800',
     lineHeight: 20,
-  },
-  storeSaveCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginVertical: 5,
-    borderWidth: 1.5,
-    borderColor: 'transparent',
-  },
-  storeSaveSelected: {
-    borderColor: '#16A34A',
-    backgroundColor: '#F0FDF4',
-  },
-  storeSaveIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 14,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  storeSaveTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  storeSaveName: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: '#0F172A',
-  },
-  currentPill: {
-    backgroundColor: '#DCFCE7',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
-  },
-  currentPillText: {
-    color: '#15803D',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  storeSaveMeta: {
-    fontSize: 12,
-    color: '#64748B',
-    marginTop: 3,
-  },
-  tagsRow: {
-    flexDirection: 'row',
-    gap: 6,
-    marginTop: 6,
-  },
-  inStorePill: {
-    backgroundColor: '#FEF3C7',
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  inStorePillText: {
-    color: '#92400E',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  collectPill: {
-    backgroundColor: '#E0E7FF',
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  collectPillText: {
-    color: '#3730A3',
-    fontSize: 10,
-    fontWeight: '700',
   },
   modalBackdrop: {
     flex: 1,
