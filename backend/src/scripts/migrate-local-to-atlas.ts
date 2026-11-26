@@ -5,27 +5,32 @@
  * Usage:
  *   MONGODB_URI="mongodb+srv://...@cluster0.xxx.mongodb.net/?appName=Cluster0" \
  *   npx tsx src/scripts/migrate-local-to-atlas.ts scan_and_go_db nicholas-portfolio
+ *   npx tsx src/scripts/migrate-local-to-atlas.ts scan_and_go_db=NewRealitiesChama
  */
 import { MongoClient } from 'mongodb';
 
 const ATLAS_URI = process.env.MONGODB_URI;
 const SOURCE_URI = process.env.LOCAL_MONGODB_URI || 'mongodb://127.0.0.1:27017';
-const DB_NAMES = process.argv.slice(2);
+// Each arg is either `dbName` (same name both sides) or `srcDb=dstDb`.
+const PAIRS = process.argv.slice(2).map((a) => {
+  const [src, dst] = a.split('=');
+  return { src, dst: dst || src };
+});
 
 if (!ATLAS_URI) {
   console.error('Set MONGODB_URI to the Atlas connection string (no db path needed).');
   process.exit(1);
 }
-if (DB_NAMES.length === 0) {
-  console.error('Pass database names to migrate, e.g. scan_and_go_db nicholas-portfolio');
+if (PAIRS.length === 0) {
+  console.error('Pass database names to migrate, e.g. scan_and_go_db nicholas-portfolio or scan_and_go_db=NewRealitiesChama');
   process.exit(1);
 }
 
-async function migrateDb(src: MongoClient, dst: MongoClient, dbName: string) {
-  const srcDb = src.db(dbName);
-  const dstDb = dst.db(dbName);
+async function migrateDb(src: MongoClient, dst: MongoClient, srcDbName: string, dstDbName: string) {
+  const srcDb = src.db(srcDbName);
+  const dstDb = dst.db(dstDbName);
   const collections = await srcDb.listCollections().toArray();
-  console.log(`[${dbName}] ${collections.length} collections on localhost`);
+  console.log(`[${srcDbName} -> ${dstDbName}] ${collections.length} collections on localhost`);
 
   for (const { name } of collections) {
     const srcCol = srcDb.collection(name);
@@ -55,7 +60,7 @@ async function migrateDb(src: MongoClient, dst: MongoClient, dbName: string) {
     }
     console.log(`  ${name}: ${docs.length} docs synced (${modified} changed)`);
   }
-  console.log(`[${dbName}] done`);
+  console.log(`[${srcDbName} -> ${dstDbName}] done`);
 }
 
 async function main() {
@@ -65,8 +70,8 @@ async function main() {
   await dst.connect();
   console.log(`Source: ${SOURCE_URI}`);
   console.log(`Target: Atlas cluster`);
-  for (const db of DB_NAMES) {
-    await migrateDb(src, dst, db);
+  for (const pair of PAIRS) {
+    await migrateDb(src, dst, pair.src, pair.dst);
   }
   await src.close();
   await dst.close();
